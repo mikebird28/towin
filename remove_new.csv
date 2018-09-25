@@ -40,9 +40,9 @@ hi_RunningScore
 hi_StableEvalCode
 hi_HeavyFitness
 hi_ClassCode
-#hi_JockeyName
-hi_TrainerName
+hi_JockeyName
 hi_BasisWeight
+hi_TrainerName
 hi_TrainerDivision
 hi_Pre1RaceID
 hi_Pre1ResultID
@@ -55,7 +55,6 @@ hi_Pre4ResultID
 hi_Pre5RaceID
 hi_Pre5ResultID
 hi_CompositeSign
-hi_CancelFlag
 
 #Sign Codes
 hi_CompositeSign
@@ -101,10 +100,6 @@ hi_PositionScoreOrder
 hi_JockeyWin
 hi_JockeyPlace
 
-#
-hi_TurfFitness
-hi_DirtFitness
-
 #Ver8 Information 20002~
 hi_RunningStyle2
 hi_Appearance
@@ -128,9 +123,6 @@ hi_ChangeStable
 hi_DoCastration
 hi_ChangeJockey
 hi_StableDate
-hi_StableElapsedDates
-hi_Prize
-hi_ClassPrize
 
 #latest information
 li_RaceID
@@ -145,7 +137,6 @@ li_PlaceOdds
 li_OddsSign
 li_CompositeSign
 li_PaddokSign
-li_WeightDelta
 
 #previous-1 result information
 pre1_RaceID
@@ -166,18 +157,6 @@ pre1_HorseName
 pre1_JockeyID
 pre1_TrainerID
 pre1_PlaceOdds
-pre1_PaybackWin
-pre1_PaybackPlace
-pre1_JRDBRemarks
-pre1_Disadvantage
-pre1_DisadvantageFinal
-pre1_DisadvantageMiddle
-pre1_DisadvantageOpening
-pre1_AtmospherCode
-pre1_RaceInfo
-pre1_Position
-pre1_LateStart
-pre1_IrregularCategory
 
 #previous-2 result information
 pre2_RaceID
@@ -198,18 +177,6 @@ pre2_HorseName
 pre2_JockeyID
 pre2_TrainerID
 pre2_PlaceOdds
-pre2_PaybackWin
-pre2_PaybackPlace
-pre2_JRDBRemarks
-pre2_Disadvantage
-pre2_DisadvantageFinal
-pre2_DisadvantageMiddle
-pre2_DisadvantageOpening
-pre2_AtmospherCode
-pre2_RaceInfo
-pre2_Position
-pre2_LateStart
-pre2_IrregularCategory
 
 #previous-3 result information
 pre3_RaceID
@@ -230,19 +197,6 @@ pre3_HorseName
 pre3_JockeyID
 pre3_TrainerID
 pre3_PlaceOdds
-pre3_PaybackWin
-pre3_PaybackPlace
-pre3_JRDBRemarks
-pre3_Disadvantage
-pre3_DisadvantageFinal
-pre3_DisadvantageMiddle
-pre3_DisadvantageOpening
-pre3_AtmospherCode
-pre3_RaceInfo
-pre3_Position
-pre3_LateStart
-pre3_IrregularCategory
-
 
 #Race Information
 ri_Day
@@ -252,18 +206,9 @@ ri_Time
 #training information
 ti_RaceID
 ti_HorseID
-ti_TrainCourseObstacle
-ti_TrainCoursePoly
-ti_TrainCoursePool
-ti_TrainCourseTurf
-ti_TrainCourseWood
-ti_TrainCourseSlope
-ti_TrainCourseDirt
 
 #basic info
 bi_PedigreeID
 bi_BirthDay
 bi_FPedigreeCode2
 bi_MFPedigreeCode2
-bi_MotherName
-bi_MFatherName

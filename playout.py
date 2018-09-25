@@ -25,24 +25,35 @@ def main():
     logging.basicConfig(level = logging.DEBUG, filename = "cnn_exec.log", format = fmt)
 
     columns = ["hi_RaceID","li_WinOdds","pred","hr_PaybackWin","hr_PaybackPlace"]
-    df = pd.read_csv("train_pred.csv",usecols = columns)
-    test = pd.read_csv("test_pred.csv",usecols = columns)
-    del(train,test);gc.collect()
+    df = pd.read_csv("./data/train_pred.csv",usecols = columns)
+    test = pd.read_csv("./data/test_pred.csv",usecols = columns)
+    #del(train,test);gc.collect()
 
-    p = preprep.Preprep("./playout")
-    p = p.add(fillna,name = "fillna")
-    p = p.add(normalize, name = "norm", cache_format = "feather")
+    p = preprep.Preprep("./cache_files/playout")
+    p = p.add(fillna(),name = "fillna")
+    p = p.add(normalize(), name = "norm", cache_format = "feather")
     p = p.add(inp_to_race, name = "to_races", cache_format = "feather")
     df = p.fit_gene(df,verbose = True)
+    test_df = p.gene(test)
+    print(test_df.describe())
     del(p);gc.collect()
 
-    x = to_matrix(df.loc[:,["li_WinOdds","pred","is_padded"]])
-    y = to_matrix(df.loc[:,["hr_PaybackWin"]],for_y = True)
+
+    target = "hr_PaybackWin"
+    x1 = to_matrix(df.loc[:,["li_WinOdds","pred","is_padded"]])
+    y1 = to_matrix(df.loc[:,[target]],for_y = True)
+    y1e = to_matrix(df.loc[:,[target+"_eval"]],for_y = True)
+    x2 = to_matrix(test_df.loc[:,["li_WinOdds","pred","is_padded"]])
+    y2 = to_matrix(test_df.loc[:,[target]],for_y = True)
+    y2e = to_matrix(test_df.loc[:,[target+"_eval"]],for_y = True)
+ 
     #y = to_matrix(df.loc[:,["hr_PaybackPlace"]],for_y = True)
 
     model = nn()
-    model.fit(x,y,epochs = 10,batch_size = 32)
-    evaluate(x,y,model)
+    model.fit(x1,y1,epochs = 30,batch_size = 32, validation_data = [x2,y2])
+    print("inference finished")
+    evaluate(x1,y1e,model)
+    evaluate(x2,y2e,model)
     #gene = batch_generator(df,10000,100)
 
     """
@@ -75,7 +86,7 @@ def evaluate(x,y,model):
 def nn():
 
     activation = "relu"
-    dropout_rate = 0.1
+    dropout_rate = 0.3
     inputs = Input(shape = (18,3),dtype = "float32",name = "input")
     x = Reshape([18,3,1])(inputs)
 
@@ -84,7 +95,7 @@ def nn():
     x = BatchNormalization()(x)
     x = Dropout(dropout_rate)(x)
 
-    for i in range(3):
+    for i in range(8):
         x = Conv2D(16,[1,1],padding = "valid")(x)
         x = Activation(activation)(x)
         x = BatchNormalization()(x)
@@ -148,22 +159,25 @@ def inp_to_race(df,logger = None):
 
 class fillna(preprep.Operator):
     def __init__(self):
+        super().__init__()
         self.mean_dict = {}
 
     def on_fit(self,df,categoricals = [], logger = None):
         logger = logger or logging.getLogger(__name__)
         logger.debug("fillna : function called on fit")
-        return self.process(df,categoricals,mode = "fit")
+        return self.process(df,categoricals = categoricals,mode = "fit",logger = logger)
 
     def on_pred(self,df,categoricals = [], logger = None):
         logger = logger or logging.getLogger(__name__)
         logger.debug("fillna : function called on fit")
-        return self.process(df,categoricals,mode = "pred")
+        return self.process(df,categoricals = categoricals,mode = "pred",logger = logger)
 
     def process(self,df,mode = "fit",categoricals = [], logger = None):
         df[df.isnull()] = np.nan
-        df.loc[:,"hr_PaybackWin"] = df.loc[:,"hr_PaybackWin"].fillna(0)/100
-        df.loc[:,"hr_PaybackPlace"] = df.loc[:,"hr_PaybackPlace"].fillna(0)/100
+        df.loc[:,"hr_PaybackWin_eval"] = df.loc[:,"hr_PaybackWin"].copy().fillna(0)/100
+        df.loc[:,"hr_PaybackPlace_eval"] = df.loc[:,"hr_PaybackPlace"].copy().fillna(0)/100
+        df.loc[:,"hr_PaybackWin"] = (df.loc[:,"hr_PaybackWin"].fillna(0)/1000).clip(0.0,1.0)
+        df.loc[:,"hr_PaybackPlace"] = (df.loc[:,"hr_PaybackPlace"].fillna(0)/1000).clip(0.0,1.0)
 
         nan_rate = 1 - df.isnull().sum().sum()/float(df.size)
         logger.debug("nan rate check at start of fillna : {}".format(nan_rate))
@@ -184,22 +198,22 @@ class fillna(preprep.Operator):
         logger.debug("nan rate check at end of fillna : {}".format(nan_rate))
         return df
 
-class normalize:
+class normalize(preprep.Operator):
     def __init__(self):
         self.mean_dict = {}
         self.std_dict = {}
 
     def on_fit(self,df,numericals = [] ,logger = None):
-        self.normalize(df,"fit",numericals,logger)
+        return self.normalize(df,"fit",numericals,logger)
 
     def on_pred(self,df,numericals = [] ,logger = None):
-        self.normalize(df,"pred",numericals,logger)
+        return self.normalize(df,"pred",numericals,logger)
 
     def normalize(self,df,mode,numericals = [],logger = None):
         logger = logger or logging.getLogger(__name__)
         logger.debug("normalize : function called")
 
-        remove = ["hr_OrderOfFinish","ri_Year","hi_RaceID","hr_PaybackWin","hr_PaybackPlace"]
+        remove = ["hr_OrderOfFinish","ri_Year","hi_RaceID","hr_PaybackWin","hr_PaybackPlace","hr_PaybackWin_eval","hr_PaybackPlace_eval"]
         nan_rate = 1 - df.isnull().sum().sum()/float(df.size)
         logger.debug("nan rate befort normalization : {}".format(nan_rate))
         #targets = [c for c in df.columns if c not in remove]

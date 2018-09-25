@@ -4,63 +4,105 @@ import numpy as np
 import pandas as pd
 import gc
 
-def add_race_mean(df,numericals):
-    key = ["hi_RaceID"]
-    remove = ["hr_OrderOfFinish","hr_PaybackWin","hr_PaybackPlace","is_win","is_place","win_return","place_return","ri_Year","hi_Prize","ri_Distance"
-            "li_FiledStatus","hi_Times","ri_FirstPrize","ri_SecondPrize","ri_ThirdPrize","ri_HaedCount","ri_Month"]
-    
-    numericals = [c for c in df.columns if c in numericals]
-    #remove process features
-    numericals = [c for c in numericals if c not in remove]
+def parse_feature(df):
+    def to_dist_cat(x):
+        if 1000 <= x and x <= 1400:
+            return "sprint"
+        elif 1400 < x and x <= 1600:
+            return "mile"
+        elif 1600 < x and x <= 2200:
+            return "middle"
+        elif 2200 < x and x < 2600:
+            return "classic"
+        elif 2600 <= x:
+            return "stayer"
 
-    targets = numericals + [k for k in key if k not in numericals]
-    group = df[targets].groupby(key)
-    group_mean = group.mean().reset_index()
-    mean_columns = []
-    for c in group_mean.columns:
-        if c in key:
-            mean_columns.append(c)
+    def parse_hoof_size(x):
+        large = ["01s","05s","09s","17s","21s"]
+        midium = ["02s","06s","10s","18s","22s"]
+        small = ["03s","07s","11s","19s","23s"]
+        quite_small = ["04s","08s","12s","20s","24s"]
+        if x in large:
+            return "l"
+        elif x in midium:
+            return "m"
+        elif x in small:
+            return "s"
+        elif x in quite_small:
+            return "qs"
         else:
-            mean_columns.append("{}_mean".format(c))
-    group_mean.columns = mean_columns
-    df = df.merge(group_mean,on = key, how = "left")
-    for c in targets:
-        mean_col = "{}_mean".format(c)
-        if mean_col not in df.columns:
-            continue
-        df.loc[:,c] = df.loc[:,c] - df.loc[:,mean_col]
+            return "o"
+
+    def parse_hoof_type(x):
+        t1 = ["01s","02s","03s","04s"]
+        t2 = ["05s","06s","07s","08s"]
+        t3 = ["09s","10s","11s","12s"]
+        t4 = ["17s","18s","19s","20s"]
+        t5 = ["21s","22s","23s","24s"]
+        if x in t1:
+            return "t1"
+        elif x in t2:
+            return "t2"
+        elif x in t3:
+            return "t3"
+        elif x in t4:
+            return "t4"
+        elif x in t5:
+            return "t5"
+        else:
+            return "o"
+
+    df["distance_category"] = df.loc[:,"ri_Distance"].apply(to_dist_cat)
+    df["hoof_type"] = df.loc[:,"hi_HoofCode"].apply(parse_hoof_type)
+    df["hoof_size"] = df.loc[:,"hi_HoofCode"].apply(parse_hoof_size)
+    df.drop("hi_HoofCode",axis = 1,inplace  = True)
     return df
 
-def norm_with_race(df,numericals):
+def norm_with_race(df,categoricals = []):
     key = ["hi_RaceID"]
-    remove = ["hr_OrderOfFinish","hr_PaybackWin","hr_PaybackPlace","is_win","is_place","win_return","place_return","ri_Year","hi_Prize","ri_Distance"
-            "li_FiledStatus","hi_Times","ri_FirstPrize","ri_SecondPrize","ri_ThirdPrize","ri_HaedCount","ri_Month"]
+    remove = ["hr_OrderOfFinish","hr_PaybackWin","hr_PaybackPlace","hr_TimeDelta","hr_FinishingTime",
+            "is_win","is_place","win_return","place_return","margin","norm_time","pops_order",
+            "ri_Year","hi_Prize","ri_Distance","li_FiledStatus","hi_Times","ri_FirstPrize","ri_SecondPrize","ri_ThirdPrize","ri_HaedCount","ri_Month",
+            "hr_TimeDelta","hr_FinishingTime","margin","norm_time","win_return","place_return","oof_over_pops","pop_prediction",
+    ]
 
-    numericals = [c for c in df.columns if c in numericals]
+    numericals = [c for c in df.columns if c not in categoricals]
     numericals = [c for c in numericals if c not in remove]
     targets = numericals + [k for k in key if k not in numericals]
 
     group = df[targets].groupby(key)
     group_mean = group.mean().reset_index()
     group_std = group.std().reset_index()
+    #group_min = group.min().reset_index()
+    #group_max = group.max().reset_index()
     group_std.clip(lower = 1e-5, inplace = True)
 
     norm_columns = []
     std_columns = []
+    #min_columns = []
+    #max_columns = []
     for c in group_mean.columns:
         if c in key:
             norm_columns.append(c)
             std_columns.append(c)
+            #min_columns.append(c)
+            #max_columns.append(c)
         else:
             norm_columns.append("{}_norm".format(c))
             std_columns.append("{}_std".format(c))
+            #min_columns.append("{}_min".format(c))
+            #cmax_columns.append("{}_max".format(c))
             #df.loc[df.loc[:,c] == 0.0,c] = 1.0
 
     group_mean.columns = norm_columns
     group_std.columns = std_columns
+    #group_min.columns = min_columns
+    #group_max.columns = max_columns
 
     df = df.merge(group_mean,on = key, how = "left")
     df = df.merge(group_std,on = key, how = "left")
+    #df = df.merge(group_min,on = key, how = "left")
+    #df = df.merge(group_max,on = key, how = "left")
 
     for c in targets:
         if c == "hi_RaceID":
@@ -82,7 +124,7 @@ def fix_extra_info(df):
         "Jra","Inter","Other","Surf","SurfDist","Dist","Rotation","Course","Jockey",
         "SurfaceGood","SurfaceMiddle","SurfaceBad","SlowPace","MiddlePace","HighPace",
         "Season","Frame","JockeyDist","JockeyTrack","JockeyTrainer","JockeyBrinker","JockeyOwner","TrainerOwner",
-        "JockeyBrinker"
+        "JockeyBrinker","JockeyTrackDist",
     ]
     for p in tqdm(prefix_ls):
         #existing features"
@@ -110,6 +152,7 @@ def fix_extra_info(df):
 
         df.drop(second,inplace = True,axis = 1)
         df.drop(third,inplace = True,axis = 1)
+        df.drop(lose,inplace = True,axis = 1)
 
     total = "ei_TotalTotal"
     win = "ei_TotalWin"
@@ -121,6 +164,17 @@ def fix_extra_info(df):
     df.loc[:,place] = df.loc[:,"ei_JraPlace"] + df.loc[:,"ei_InterPlace"] + df.loc[:,"ei_OtherPlace"]
     df.loc[:,win_per] = df.loc[:,win]/df.loc[:,total]
     df.loc[:,place_per] = df.loc[:,place]/df.loc[:,total]
+
+    drop_targets = ["Jra","Inter","Other"]
+    drop_columns = []
+    for r in drop_targets:
+        prefix = "{}_{}".format(table_prefix,r)
+        drop_columns.append(prefix + "Total")
+        drop_columns.append(prefix + "First")
+        drop_columns.append(prefix + "Place")
+        drop_columns.append(prefix + "WinPer")
+        drop_columns.append(prefix + "PlacePer")
+    df.drop(drop_columns,axis = 1,inplace = True)
     return df
 
 def add_change_info(df):
@@ -142,6 +196,8 @@ def add_change_info(df):
 def add_delta_info(df):
     target_pairs = [
         ("li_HorseWeight","pre1_Weight","weight_delta"),
+        ("pre1_Weight","pre2_Weight","weight_delta_pre1"),
+        ("pre2_Weight","pre3_Weight","weight_delta_pre2"),
         ("li_BasisWeight","pre1_BasisWeight","basis_weight_delta"),
         ("pre1_Pass4","pre1_Pass3","pass_delta_pre1"),
         ("pre2_Pass4","pre2_Pass3","pass_delta_pre2"),
@@ -172,9 +228,10 @@ def add_datetime_info(df):
         f1 = pair[0]
         f2 = pair[1]
         name = pair[2]
-        date1 = pd.to_datetime(df.loc[:,f1],format ="%Y%m%ds")
+        date1 = pd.to_datetime(df.loc[:,f1],format ="%Y%m%ds",errors = "coerce")
         date2 = pd.to_datetime(df.loc[:,f2],format ="%Y%m%ds")
         df.loc[:,name] = (date1 - date2).astype(np.int64)/divider
+        df.loc[:,name] = df.loc[:,name].where(df.loc[:,name] >= 0, np.nan)
     df.drop(["ri_Datetime","pre1_RegisterdDate","pre2_RegisterdDate","pre3_RegisterdDate"],inplace = True,axis = 1)
     return df
 
@@ -233,6 +290,55 @@ def add_course_info(df):
     df["mother_surf_winper"] = df.apply(mother_surf_winper,axis = 1)
     return df
 
+horse_f = [
+    "bi_FPedigreeCode2","bi_MFPedigreeCode2","hoof_size","hoof_type","hi_RunningStyle",
+#    "hi_BodyType","hi_BellySize","hi_HipSize","hi_ChestSize",
+]
+race_f = ["ri_Discipline","li_FieldCode","distance_category","li_WeatherCode","ri_InOut",]
+
+all_f = horse_f + race_f
+
+
+def add_combinational_feature(df):
+    def comb_f(df,new,f1,f2):
+        df[new] = df.loc[:,f1] + df.loc[:,f2]
+        df[new] = df[new].where(df[f1] != "s", "s")
+        df[new] = df[new].where(df[f2] != "s", "s")
+        return df
+
+    for f1 in horse_f:
+        for f2 in race_f:
+            #premove prefix
+            if f1 != f1.lower():
+                f1_rem = f1.split("_")[1].lower()
+            else:
+                f1_rem = f1
+            if f2 != f2.lower():
+                f2_rem = f2.split("_")[1].lower()
+            else:
+                f2_rem = f2
+            nf = "{}_{}".format(f1_rem,f2_rem)
+            comb_f(df,nf,f1,f2)
+    return df
+
+def additional_categoricals():
+    ls = ["hoof_size","hoof_type","distance_category","grade_change","inout_change","leftright_change","course_change"]
+
+    for f1 in horse_f:
+        for f2 in race_f:
+            #premove prefix
+            if f1 != f1.lower():
+                f1_rem = f1.split("_")[1].lower()
+            else:
+                f1_rem = f1
+            if f2 != f2.lower():
+                f2_rem = f2.split("_")[1].lower()
+            else:
+                f2_rem = f2
+            nf = "{}_{}".format(f1_rem,f2_rem)
+            ls.append(nf)
+    return ls
+
 def add_run_style_info(df):
     #1 逃げ 2 先行 3 差し 4 追込 5 好位差し 6 自在
     groups = df[["hi_RaceID","hi_RunningStyle"]].groupby("hi_RaceID")
@@ -259,3 +365,135 @@ def add_run_style_info(df):
     df = df.merge(run_df,left_on = "hi_RaceID",right_index = True)
     return df
 
+def target_encoding(df,cats):
+    remove_features = [
+        "ri_Discipline",
+        "ri_CourseCode","ri_InOut","ri_LeftrRight","li_WeatherCode","li_FieldCode",
+        "ri_RaceGrade","hi_SexCode",
+        "pre1_LeftRight","pre2_LeftRight","pre3_LeftRight",
+        "pre1_WeatherCode","pre2_WeatherCode","pre3_WeatherCode",
+        "pre1_Discipline","pre2_Discipline","pre3_Discipline",
+        "pre1_RacePace","pre3_RacePace","pre3_RacePace",
+        "pre1_InOut","pre2_InOut","pre3_InOut",
+        "pre1_CourseCode","pre2_CourseCode","pre3_CourseCode",
+    ]
+    cats = [c for c in cats if c in df.columns]
+    for i,c in tqdm(enumerate(cats)):
+        if c in remove_features:
+            continue
+        #df = _target_encode(df,c,"is_place")
+        df = _target_encode(df,c,"margin")
+    return df
+
+def _target_encode(df,key,target,k = 100, f = 1, smoothing = True):
+    #k (int) : minimum samples to take category average into account
+    #f (int) : smoothing effect to balance categorical average vs prior
+
+    new_key = key + "_te"
+    group = df[[key,target]].groupby(key)
+    counts = group[target].mean().reset_index()
+    counts.columns = [key,new_key]
+
+    if smoothing:
+        total_ratio = df.loc[:,target].mean()
+        size = group[target].size().reset_index()
+        size.columns = [key,"n_i"]
+        counts = counts.merge(size,on = key).reset_index()
+        counts["lambda"] = 1/(1 + np.exp(-(counts["n_i"]-k)/f))
+        counts[new_key] = counts["lambda"] * counts[new_key] + (1 - counts["lambda"]) * total_ratio
+
+    df = df.merge(counts.loc[:,[key,new_key]],on = key)
+    return df
+
+def time_norm(df):
+    raw_targets = [
+        (["Distance"],["TimeDelta","FinishingTime"]),
+        (["Distance","Discipline"],["TimeDelta","FinishingTime"]),
+        (["Distance","FieldStatus"],["TimeDelta","FinishingTime"]),
+        (["Distance","CourseCode"],["TimeDelta","FinishingTime"]),
+    ]
+
+    targets = []
+    drops = []
+    for k,t in raw_targets:
+        for i in range(3):
+            pre_i_k = ["pre{}_{}".format(i+1,c) for c in k]
+            pre_i_t = ["pre{}_{}".format(i+1,c) for c in t]
+            tmp_key = "pre{}_{}_tmp".format(i+1,"_".join(k))
+            df[tmp_key] = df.loc[:,pre_i_k].astype(str).apply("_".join,axis = 1)
+            drops.append(tmp_key)
+            targets.append((tmp_key,pre_i_t))
+
+    for k,t in tqdm(targets):
+        df = _time_norm(df,k,t)
+    df.drop(drops,axis = 1, inplace = True)
+    return df
+
+def _time_norm(df,key,targets):
+    #keys (str) : list of groupby key
+    #targets (list) : list of target values
+    group = df.loc[:, targets + [key]].groupby(key)
+    mean = group.mean()
+    std = group.std().clip(1e-8,None)
+
+    mean.columns = ["{}_m".format(c) for c in mean.columns]
+    std.columns = ["{}_s".format(c) for c in std.columns]
+
+    agg = mean.join(std).reset_index()
+    del(group,mean,std);gc.collect();
+
+    df = df.merge(agg,on = key)
+    drops = []
+    for t in targets:
+        prefix = extract_prefix(key)
+        new_key = prefix + "_" + "_".join(drop_prefix([t,key])) + "_score"
+        key_mean = t + "_m"
+        key_std = t + "_s"
+        drops.append(key_mean)
+        drops.append(key_std)
+        df[new_key] = (df[t] - df[key_mean])/df[key_std]
+    df.drop(drops,axis = 1, inplace = True)
+    return df
+
+def extract_prefix(x):
+    return x.split("_")[0]
+
+def drop_prefix(x_ls):
+    ls = []
+    for i in x_ls:
+        new_i = "_".join(i.split("_")[1:])
+        ls.append(new_i)
+    return ls
+
+
+def avg_past3(df,categoricals = []):
+    features = []
+    for c in df.columns:
+        if c in categoricals:
+            continue
+        if c.startswith("pre1_"):
+            prefix_removed = "_".join(c.split("_")[1:])
+            features.append(prefix_removed)
+    drop_targets = []
+    for c in features:
+        past3_f = []
+        for i in range(3):
+            col = "pre{}_{}".format(i+1,c)
+            past3_f.append(col)
+            if i != 0:
+                drop_targets.append(col)
+        avg3_name = "avg3_{}".format(c)
+        max3_name = "max3_{}".format(c)
+        min3_name = "min3_{}".format(c)
+        df.loc[:,avg3_name] = df.loc[:,past3_f].mean(axis = 1)
+        df.loc[:,min3_name] = df.loc[:,past3_f].min(axis = 1)
+        df.loc[:,max3_name] = df.loc[:,past3_f].max(axis = 1)
+    df.drop(drop_targets, axis = 1, inplace = True)
+    return df
+            
+if __name__ == "__main__":
+    df = pd.read_csv("data/output.csv",nrows = 50000)
+    df["is_win"] = (df["hr_OrderOfFinish"] == 1).astype(np.int8)
+    df = add_combinational_feature(df,[])
+    _target_encode(df,"fpedigreecode_discipline","is_win")
+    _target_encode(df,"fpedigreecode_field","is_win")

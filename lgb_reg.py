@@ -13,24 +13,19 @@ from tqdm import tqdm
 
 import add_features
 
-PROCESS_FEATURE = utils.process_features()
+PROCESS_FEATURE = ["hi_RaceID","ri_Year","hr_OrderOfFinish","li_WinOdds","margin"]
 
 def main():
     mode = "normal"
-    mode = "tuning"
+    #mode = "tuning"
 
-    #target_variable = "norm_time"
-    #target_variable = "norm_margin"
-    #target_variable = "div_time"
-    #target_variable = "norm_time"
     target_variable = "margin"
-    objective = "regression"
 
-    columns_dict = utils.load_dtypes("./data/dtypes.csv")
+    columns_dict = load_dtypes("./data/dtypes.csv")
     columns = sorted(columns_dict.keys())
-    categoricals,numericals = utils.cats_and_nums(columns,columns_dict)
+    categoricals,numericals = cats_and_nums(columns,columns_dict)
     categoricals = categoricals + add_features.additional_categoricals()
-    removes = utils.load_removes("remove.csv")
+    removes = load_removes("remove.csv")
     #removes = load_removes("remove_new.csv")
 
     df = pd.read_csv("./data/output.csv",dtype = columns_dict,usecols = columns)
@@ -40,33 +35,24 @@ def main():
     p = p.add(utils.replace_few, params = {"categoricals" : categoricals} , cache_format = "feather", name ="replace_few")
     p = p.add(label_encoding,params = {"categoricals":categoricals},cache_format = "feather",name = "lenc")
     p = p.add(remove_unused,params = {"removes" : removes},cache_format = "feather",name = "remove")
-    #p = p.add(fillna, params = {"mode" : "race", "categoricals" : categoricals},cache_format = "feather",name = "fillna")
-    p = p.add(feature_engineering,params = {"numericals":numericals,"categoricals" :categoricals},cache_format = "feather",name = "feng")
+    p = p.add(feature_engineering,params = {"numericals":numericals},cache_format = "feather",name = "feng")
     #p = p.add(add_target_variables,cache_format = "feather",name = "target")
     df = p.fit_gene(df,verbose = True)
-
-    print(len(df))
-    print(df["norm_time"].describe())
-    print(df["margin"].describe())
-    df.dropna(subset = ["margin"],inplace = True)
-    print(df[target_variable].isnull().sum())
-    df[target_variable] = np.log(1 + df[target_variable])
 
     if mode == "normal":
         kf = RaceKFold(df,n = 10)
         score = Score()
         for i,(df1,df2) in enumerate(kf):
             if i == 0:
-                model = light_gbm(df1,df2,categoricals,show_importance = True,score = score,target_variable = target_variable, objective = objective)
+                model = light_gbm(df1,df2,categoricals,show_importance = True,score = score,target_variable = target_variable)
                 output_predicted_dataset(df1,df2,model)
             else:
-                light_gbm(df1,df2,categoricals,show_importance = False,score = score,target_variable = target_variable, objective = objective)
-                #light_gbm(df1,df2,categoricals,show_importance = True,score = score)
+                light_gbm(df1,df2,categoricals,show_importance = False,score = score)
 
             del(df1,df2);gc.collect()
         score.show()
     else:
-        optimize_params(df,categoricals,target_variable = target_variable,objective = objective,metrics = "l2")
+        optimize_params(df,categoricals)
 
     #df1,df2 = to_trainable(df, year = 2017)
     #del(p,df);gc.collect()
@@ -89,53 +75,27 @@ def search_unnecessary(fdf,categoricals):
         print("{} - score except  {} is  {}".format(typ,col,s))
 
 
-def light_gbm(df1,df2,categoricals,score = None,show_importance = True,objective = "binary",target_variable = "is_win"):
-    x1,y1 = filter_df(df1,train = True, target_variable = target_variable)
-    x2,y2 = filter_df(df2,target_variable = target_variable)
-    if objective == "binary":
-        params = {
-            'task': 'train',
-            'boosting_type': 'gbdt',
-            'objective': objective,
-            'metric': 'mse',
-            'max_depth': 3,
-            'num_leaves': 800,
-            'min_child_samples': 80,
-            'scale_pos_weight': 1.0,
-            'subsample': 0.77,
-            'colsample_bytree': 0.37,
-            'lambda_l2' : 0.0,
-            'lambda_l1' : 5.0,
+def light_gbm(df1,df2,categoricals,score = None,show_importance = True,typ = "classify",target_variable = "is_win"):
+    x1,y1 = filter_df(df1,target_variable)
+    x2,y2 = filter_df(df2)
+    params = {
+        'task': 'train',
+        'boosting_type': 'gbdt',
+        'objective': 'regression',
+        'metric': 'mse',
 
-            'num_iterations' : 20000,
-            'max_delta_step' : 20,
+        'max_depth': 3,
+        'num_leaves': 500,
+        'min_child_samples': 50,
+        'scale_pos_weight': 1.0,
+        'subsample': 0.28,
+        'colsample_bytree': 0.789,
+        'bagging_freq': 5,
+        'learning_rate': 0.005,
+        'verbose': -1,
+    }
 
-            'bagging_freq': 1,
-            'learning_rate': 0.01,
-            'verbose': -1,
-        }
-    else:
-        params = {
-            'task': 'train',
-            'boosting_type': 'gbdt',
-            'objective': objective,
-            'metric': 'mse',
-            'max_depth': 50,
-            'num_leaves': 10,
-            'min_child_samples': 38,
-            'scale_pos_weight': 1.0,
-            'subsample': 0.72,
-            'colsample_bytree': 1.0,
-            'lambda_l2' : 0.0,
-            'lambda_l1' : 0.0,
 
-            'num_iterations' : 20000,
-            'max_delta_step' : 20,
-
-            'bagging_freq': 1,
-            'learning_rate': 0.01,
-            'verbose': -1,
-        }
 
     features = x1.columns
     categoricals = list(filter(lambda x: x in categoricals,features))
@@ -159,15 +119,16 @@ def light_gbm(df1,df2,categoricals,score = None,show_importance = True,objective
         importance = sorted(importance, key = lambda x : x[1])
         for k,v in importance:
             print("{} : {}".format(k,v))
-        #score_threhold(model,df2)
 
-    win_hit,place_hit,win_return,place_return = evaluate(df2,model,features,show_results = True,mode = "argmin")
+    win_hit,place_hit,win_return,place_return = evaluate(df2,model,features,show_results = True)
+    score_threhold(model,df2)
     if score is not None:
         score.register(win_hit,place_hit,win_return,place_return)
     return model
 
-def optimize_params(df,categoricals,objective = "binary",target_variable = "is_win",metrics = "auc"):
-    df = df[df["ri_Year"] >= 2013]
+def optimize_params(df,categoricals):
+    #df = df[df["ri_Year"] >= 2013]
+    metrics = "auc"
     count = 0
 
     def __objective(values):
@@ -186,13 +147,13 @@ def optimize_params(df,categoricals,objective = "binary",target_variable = "is_w
             'lambda_l1' : values[5],
             'bagging_freq': 1,
             'max_delta_step' : 20,
-            #'scale_pos_weight': 1,
+            'scale_pos_weight': 1,
 
-            'learning_rate': 0.01,
+            'learning_rate': values[6],
             #'subsample_freq': 1,
             'metric':metrics,
             'boosting_type': 'gbdt',
-            'objective': objective,
+            'objective': 'binary',
             'task':'train',
             'verbose':-1,
         }
@@ -202,8 +163,8 @@ def optimize_params(df,categoricals,objective = "binary",target_variable = "is_w
      
         scores = []
         for i,(train,test) in enumerate(kf):
-            x1,y1 = filter_df(train,train = True, target_variable = target_variable)
-            x2,y2 = filter_df(test, target_variable = target_variable)
+            x1,y1 = filter_df(train)
+            x2,y2 = filter_df(test)
 
             features = x1.columns
             cats = list(filter(lambda x: x in categoricals,features))
@@ -227,26 +188,16 @@ def optimize_params(df,categoricals,objective = "binary",target_variable = "is_w
         avg_score = sum(scores)/len(scores)
         print("avg_score : {}".format(avg_score))
         print()
-
-        show_importance = False
-        if show_importance:
-            importance = zip(x1.columns,model.feature_importance())
-            importance = sorted(importance, key = lambda x : x[1])
-            for k,v in importance:
-                print("{} : {}".format(k,v))
-            score_threhold(model,test)
-
-
-        return avg_score
-        #return -avg_score
+        return -avg_score
 
     space = [
-        Integer(3, 200, name='max_depth'),
-        Integer(10,1000, name='num_leaves'),
-        Integer(1, 100, name='min_child_samples'), #1
+        Integer(3, 50, name='max_depth'),
+        Integer(100,1000, name='num_leaves'),
+        Integer(70, 100, name='min_child_samples'), #1
         Real(0.01, 1.0, name='subsample'),
         Real(0.01, 1.0, name='colsample_bytree'),
         Real(0, 20.0,name='lambda_l1'),
+        Real(0.001, 0.01, name='learning_rate'),
     ]
     res_gp = gp_minimize(__objective, space, n_calls=700,n_random_starts=1,xi = 0.005)
     print(res_gp)
@@ -269,8 +220,15 @@ def preprocess(df):
     df = df.loc[~df.loc[:,"hi_ConditionClass"].isin(["0s","s"]),:]
     df = df.loc[df.loc[:,"ri_CourseCode"] == "06s",:]
 
+    df = calc_pop_order(df)
     #add target variables
-    df = utils.generate_target_features(df)
+    df.loc[:,"is_win"] = (df.loc[:,"hr_OrderOfFinish"] == 1).astype(np.int32)
+    df.loc[:,"is_place"] = df.loc[:,"hr_PaybackPlace"].notnull().astype(np.int32)
+    df.loc[:,"win_return"] = (df.loc[:,"hr_PaybackWin"].fillna(0) - 100) / 100
+    df.loc[:,"place_return"] = (df.loc[:,"hr_PaybackWin"].fillna(0) - 100) / 100
+    df.loc[:,"margin"] = df.loc[:,"hr_FinishingDelta"]
+    df.loc[:,"oof_over_pops"] = (df["hr_OrderOfFinish"] < df["pops_order"]).astype(np.int32)
+    df.loc[:,"pop_prediction"] = df["oof_over_pops"] * df["is_place"]
 
     #remove illegal values
     df["hi_RunningStyle"] = df.loc[:,"hi_RunningStyle"].where(df.loc[:,"hi_RunningStyle"] != "8s","s")
@@ -281,7 +239,6 @@ def preprocess(df):
 
     print("add_comb_info")
     df = add_features.add_combinational_feature(df)
-    print(df.columns)
 
     print("add_change_info")
     df = add_features.add_change_info(df)
@@ -293,17 +250,9 @@ def preprocess(df):
     df = add_features.add_course_info(df)
     return df
 
-def feature_engineering(df,numericals = [],categoricals = []):
-    print("log margin")
-    df["per1_log_delta"] = np.log(1 + df["pre1_TimeDelta"])
-    df["per2_log_delta"] = np.log(1 + df["pre2_TimeDelta"])
-    df["per3_log_delta"] = np.log(1 + df["pre3_TimeDelta"])
-
+def feature_engineering(df,numericals = []):
     print("add speed")
     df = add_features.add_speed(df)
-
-    print("add normalized time")
-    df = add_features.time_norm(df)
 
     print("add corner")
     df = add_features.add_corner_info(df)
@@ -314,14 +263,11 @@ def feature_engineering(df,numericals = [],categoricals = []):
     print("add_delta_info")
     df = add_features.add_delta_info(df)
 
-    print("past averaginge")
-    df = add_features.avg_past3(df,categoricals = categoricals)
-
     print("normalizing with race")
-    df = add_features.norm_with_race(df,categoricals)
+    df = add_features.norm_with_race(df,numericals)
 
-    #print("target encoding")
-    #df = add_features.target_encoding(df,categoricals)
+    #print("add_race_avg")
+    #df = add_features.add_race_mean(df,numericals)
     return df
 
 def add_speed(df):
@@ -343,6 +289,26 @@ def add_speed(df):
         df[oof_ratio] = df[oof]/df[head_count]
     return df
 
+def load_dtypes(dtypes_path):
+    dtypes = {}
+    allow_hr = ["hr_OrderOfFinish","hr_PaybackWin","hr_PaybackPlace"]
+    with open(dtypes_path) as fp:
+        for row in fp.readlines():
+            row_s = row.strip().split(",")
+            name = row_s[0]
+            dtyp = row_s[1]
+            if name.startswith("hr_") and name not in allow_hr:
+                continue
+            dtypes[name] = dtyp
+    return dtypes
+
+def load_removes(remove_path):
+    ls = []
+    with open(remove_path) as fp:
+        for row in fp.readlines():
+            ls.append(row.strip())
+    return sorted(ls)
+
 def cats_and_nums(usecols,dtypes):
     cats = []
     nums = []
@@ -355,13 +321,12 @@ def cats_and_nums(usecols,dtypes):
     nums = sorted(nums)
     return (cats,nums)
 
-def filter_df(df,target_variable = "is_win",train = False):
+def filter_df(df,target_variable = "is_win"):
     #target_variable = "pop_prediction"
+    y = df.loc[:,target_variable]
     remove = ["hi_RaceID","ri_Year","hr_OrderOfFinish","hr_PaybackWin","hr_PaybackPlace",
             "is_win","is_place","win_return","place_return","li_WinOdds",
             "oof_over_pops","pop_prediction"]
-    remove += PROCESS_FEATURE
-    remove = list(set(remove))
     features = []
     for c in df.columns:
         should_add = True
@@ -371,10 +336,7 @@ def filter_df(df,target_variable = "is_win",train = False):
         if should_add:
             features.append(c)
     features = sorted(features)
-    if train:
-        #df = upsampling(df,target_variable)
-        pass
-    y = df.loc[:,target_variable]
+
     #features = list(filter(lambda x : x not in remove, df.columns))
     return df.loc[:,features],y
 
@@ -387,16 +349,15 @@ def downsample(df,y):
     df = pd.concat([df_true,df_false],axis = 0)
     return df[x_columns],df[target]
 
-def evaluate(df,model,features,show_results = True, mode = "argmax"):
+def evaluate(df,model,features,show_results = True,typ = "argmax"):
     #df = pd.concat([df,y],axis = 1)
     x1,y1 = filter_df(df)
     df.loc[:,"pred"] = model.predict(x1)
-    #contribute = model.predict(x1,pred_contrib = True)[0]
     df.loc[:,"pred_bin"] = 0
 
     groups = df.loc[:,["hi_RaceID","pred","pred_bin"]].groupby("hi_RaceID")
     for i,g in groups:
-        if mode == "argmax":
+        if typ == "argmax":
             df.loc[g["pred"].idxmax(),"pred_bin"] = 1
         else:
             df.loc[g["pred"].idxmin(),"pred_bin"] = 1
@@ -453,8 +414,7 @@ def add_target_variables(df):
     return df
 
 def RaceKFold(df,n):
-    #random_seed = 32
-    random_seed = 16
+    random_seed = 32
     np.random.seed(random_seed)
     race_id = df.loc[:,"hi_RaceID"].unique()
     np.random.shuffle(race_id)
@@ -558,58 +518,6 @@ def score_threhold(model,df):
         place_hitper = place_hit.sum()/buy.sum()
         place_retper = place_ret.sum()/(buy.sum() * 100)
         print("score : {} , buynum :  {}, - win : {}, {}, place : {} , {}".format(i,buy.sum(), win_hitper ,win_retper ,place_hitper, place_retper))
-
-def upsampling(df,target):
-    value_1 = df.loc[df.loc[:,target] == 1,:]
-    value_0 = df.loc[df.loc[:,target] == 0,:]
-    size_1 = len(value_1)
-    size_0 = len(value_0)
-
-    upsample_rate = size_0/size_1
-    value_1 = value_1.sample(frac = upsample_rate,replace = True)
-    df = pd.concat([value_0,value_1],axis = 0)
-    del(value_1,value_0);gc.collect()
-    df = df.sample(frac = 1.0).reset_index(drop = True)
-    return df
-
-def fillna(df, mode = "normal",categoricals = []):
-    numericals = [c for c in df.columns if c not in categoricals]
-    if mode == "normal":
-        for c in numericals:
-            mean = df.loc[:,c].mean()
-            df.loc[:,c] = df.fillna(mean)
-        return df
-
-    elif mode == "zero":
-        df.loc[:,numericals] = df.loc[:,numericals].fillna(0)
-        return df
-
-    elif mode == "race":
-        targets = numericals + ["hi_RaceID"]
-        groups = df.loc[:,targets].groupby("hi_RaceID")
-        group_mean = groups.mean().reset_index()
-        del(groups);gc.collect()
-
-        mean_columns = []
-        for c in group_mean.columns:
-            if c  == "hi_RaceID":
-                mean_columns.append(c)
-            else:
-                mean_columns.append("{}_mean".format(c))
-        group_mean.columns = mean_columns
-        df = df.merge(group_mean,on = "hi_RaceID", how = "left")
-
-        for c in targets:
-            if c == "hi_RaceID" or c in PROCESS_FEATURE:
-                continue
-            mean_col = "{}_mean".format(c)
-            if mean_col not in df.columns:
-                continue
-            df.loc[:,c] = df.loc[:,c].fillna(df.loc[:,mean_col])
-
-        drop_targets = [c for c in mean_columns if c != "hi_RaceID"]
-        df.drop(drop_targets,inplace = True,axis = 1)
-        return df
 
 if __name__ == "__main__":
     main()

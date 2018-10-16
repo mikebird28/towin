@@ -23,7 +23,8 @@ def generate_target_features(df,calc_pop = False):
     #df.loc[df.loc[:,"hr_OrderOfFinish"] == 1, "hr_TimeDelta"] = 0.0
     df = calc_margin(df)
 
-    df.loc[:,"is_win"] = (df.loc[:,"hr_OrderOfFinish"] == 1).astype(np.int32)
+    df.loc[:,"is_win"] = df.loc[:,"hr_PaybackWin"].notnull().astype(np.int32)
+    #df.loc[:,"is_win"] = (df.loc[:,"hr_OrderOfFinish"] == 1).astype(np.int32)
     df.loc[:,"is_place"] = df.loc[:,"hr_PaybackPlace"].notnull().astype(np.int32)
     df.loc[:,"win_return"] = (df.loc[:,"hr_PaybackWin"].fillna(0) - 100) / 100
     df.loc[:,"place_return"] = (df.loc[:,"hr_PaybackWin"].fillna(0) - 100) / 100
@@ -169,6 +170,18 @@ def one_hot_encoding(df,categoricals):
         df.drop(c,axis = 1,inplace = True)
         df = df.concat(encoded,axis = 1)
     return df
-        
+
+def remove_illegal_races(df):
+    groups = df[["is_win","hi_RaceID","hr_TimeDelta"]].groupby("hi_RaceID")
+    illegals = []
+
+    for i,g in groups:
+        mx = g["is_win"].max()
+        if mx != 1.0:
+            race_id = i
+            illegals.append(race_id)
+    df = df[~df["hi_RaceID"].isin(illegals)]
+    return df
+            
 
 

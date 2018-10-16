@@ -3,4 +3,8 @@ data/
 models/
 old/
 eda/
+train_pred.csv
+test_pred.csv
+lgb_exec.log
+cnn_exec.log
 

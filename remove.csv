@@ -40,7 +40,7 @@ hi_RunningScore
 hi_StableEvalCode
 hi_HeavyFitness
 hi_ClassCode
-#hi_JockeyName
+hi_JockeyName
 hi_TrainerName
 hi_BasisWeight
 hi_TrainerDivision
@@ -140,7 +140,7 @@ li_InfoScore
 li_OddsScore
 li_PaddockScore
 li_CompositeScore
-li_WinOdds
+#li_WinOdds
 li_PlaceOdds
 li_OddsSign
 li_CompositeSign
@@ -267,3 +267,4 @@ bi_FPedigreeCode2
 bi_MFPedigreeCode2
 bi_MotherName
 bi_MFatherName
+bi_FatherName

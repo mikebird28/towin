@@ -2,22 +2,29 @@ import lightgbm as lgb
 import preprep
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
-from sklearn.cross_validation import train_test_split,KFold
-from skopt.space import Real,Integer
-from skopt.plots import plot_convergence
-from skopt import gp_minimize
+from sklearn.model_selection import train_test_split,KFold
+#from skopt.space import Real,Integer
+#from skopt.plots import plot_convergence
+#from skopt import gp_minimize
 import numpy as np
 import gc
 import utils
 from tqdm import tqdm
+import logging
 
 import add_features
+from hyperopt import fmin, tpe, hp, STATUS_OK, Trials
 
 PROCESS_FEATURE = utils.process_features()
+TQDM_DISABLE = True
 
 def main():
+    fmt = "%(asctime)s %(levelname)s %(name)s :%(message)s"
+    logging.basicConfig(level = logging.INFO, filename = "lgb_exec.log", format = fmt)
+    cache_mode = False
+
     mode = "normal"
-    mode = "tuning"
+    #mode = "tuning"
 
     #target_variable = "norm_time"
     #target_variable = "norm_margin"
@@ -40,16 +47,11 @@ def main():
     p = p.add(utils.replace_few, params = {"categoricals" : categoricals} , cache_format = "feather", name ="replace_few")
     p = p.add(label_encoding,params = {"categoricals":categoricals},cache_format = "feather",name = "lenc")
     p = p.add(remove_unused,params = {"removes" : removes},cache_format = "feather",name = "remove")
-    #p = p.add(fillna, params = {"mode" : "race", "categoricals" : categoricals},cache_format = "feather",name = "fillna")
     p = p.add(feature_engineering,params = {"numericals":numericals,"categoricals" :categoricals},cache_format = "feather",name = "feng")
-    #p = p.add(add_target_variables,cache_format = "feather",name = "target")
+    p = p.add(utils.remove_illegal_races, params = {}, cache_format = "feather", name = "rem_illegals")
     df = p.fit_gene(df,verbose = True)
 
-    print(len(df))
-    print(df["norm_time"].describe())
-    print(df["margin"].describe())
     df.dropna(subset = ["margin"],inplace = True)
-    print(df[target_variable].isnull().sum())
     df[target_variable] = np.log(1 + df[target_variable])
 
     if mode == "normal":
@@ -68,28 +70,10 @@ def main():
     else:
         optimize_params(df,categoricals,target_variable = target_variable,objective = objective,metrics = "l2")
 
-    #df1,df2 = to_trainable(df, year = 2017)
-    #del(p,df);gc.collect()
+def light_gbm(df1,df2,categoricals,score = None,show_importance = True,objective = "binary",target_variable = "is_win",logger = None):
+    logger = logger or logging.getLogger(__name__)
+    logger.info("start training")
 
-    #df_ds,y_ds = downsample(df,y)
-    #light_gbm(df1,df2,categoricals)
-
-    #features = list(filter(lambda x : x not in remove, x.columns))
-    #evaluate(df2,model,features)
-
-def search_unnecessary(fdf,categoricals):
-    score = light_gbm(fdf,categoricals)
-    for col in fdf.columns:
-        feat_except_col = [c for c in fdf.columns if c != col]
-        cat_except_col = [c for c in categoricals if c != col]
-        s = light_gbm(fdf.loc[:,feat_except_col],y,cat_except_col,show_importance = False)
-        typ = "T"
-        if s < score:
-            typ = "F"
-        print("{} - score except  {} is  {}".format(typ,col,s))
-
-
-def light_gbm(df1,df2,categoricals,score = None,show_importance = True,objective = "binary",target_variable = "is_win"):
     x1,y1 = filter_df(df1,train = True, target_variable = target_variable)
     x2,y2 = filter_df(df2,target_variable = target_variable)
     if objective == "binary":
@@ -120,14 +104,14 @@ def light_gbm(df1,df2,categoricals,score = None,show_importance = True,objective
             'boosting_type': 'gbdt',
             'objective': objective,
             'metric': 'mse',
-            'max_depth': 50,
-            'num_leaves': 10,
-            'min_child_samples': 38,
+            'max_depth': 135,
+            'num_leaves': 52,
+            'min_child_samples': 85,
             'scale_pos_weight': 1.0,
-            'subsample': 0.72,
-            'colsample_bytree': 1.0,
+            'subsample': 0.61,
+            'colsample_bytree': 0.245,
             'lambda_l2' : 0.0,
-            'lambda_l1' : 0.0,
+            'lambda_l1' : 2.8,
 
             'num_iterations' : 20000,
             'max_delta_step' : 20,
@@ -158,7 +142,9 @@ def light_gbm(df1,df2,categoricals,score = None,show_importance = True,objective
         importance = zip(x1.columns,model.feature_importance())
         importance = sorted(importance, key = lambda x : x[1])
         for k,v in importance:
-            print("{} : {}".format(k,v))
+            msg = "{} : {}".format(k,v)
+            print(msg)
+            logger.info(msg)
         #score_threhold(model,df2)
 
     win_hit,place_hit,win_return,place_return = evaluate(df2,model,features,show_results = True,mode = "argmin")
@@ -166,24 +152,30 @@ def light_gbm(df1,df2,categoricals,score = None,show_importance = True,objective
         score.register(win_hit,place_hit,win_return,place_return)
     return model
 
-def optimize_params(df,categoricals,objective = "binary",target_variable = "is_win",metrics = "auc"):
+def optimize_params(df,categoricals,objective = "binary",target_variable = "is_win",metrics = "auc",logger = None):
+    logger = logger or logging.getLogger(__name__)
+    logger.info("start training")
+
     df = df[df["ri_Year"] >= 2013]
     count = 0
 
     def __objective(values):
         nonlocal count
         count += 1
+        msg = "start round {} with {}".format(count,values)
+        print(msg)
+        logging.info(msg)
+
         n_folds = 5 
         num_boost_round = 20000
         early_stopping_rounds = 200
-        print(values)
         params = {
-            'max_depth': values[0], 
-            'num_leaves': values[1],
-            'min_child_samples': values[2], #minimal number of data in one leaf.
-            'subsample': values[3], #alias of bagging_fraction
-            'colsample_bytree': values[4],
-            'lambda_l1' : values[5],
+            'max_depth': values["max_depth"], 
+            'num_leaves': values["num_leaves"],
+            'min_child_samples': values["min_child_samples"], #minimal number of data in one leaf.
+            'subsample': values["subsample"], #alias of bagging_fraction
+            'colsample_bytree': values["colsample_bytree"],
+            'lambda_l1' : values["lambda_l1"],
             'bagging_freq': 1,
             'max_delta_step' : 20,
             #'scale_pos_weight': 1,
@@ -222,11 +214,14 @@ def optimize_params(df,categoricals,objective = "binary",target_variable = "is_w
             )
             score = model.best_score["valid"][metrics]
             scores.append(score)
-            print("[{}] score ... {}".format(count,score))
+            log_msg  ="[{}] score ... {}".format(count,score)
+            print(log_msg)
+            logging.info(log_msg)
 
         avg_score = sum(scores)/len(scores)
-        print("avg_score : {}".format(avg_score))
-        print()
+        log_msg = "avg_score : {}".format(avg_score)
+        print(log_msg)
+        logging.info(log_msg)
 
         show_importance = False
         if show_importance:
@@ -235,46 +230,64 @@ def optimize_params(df,categoricals,objective = "binary",target_variable = "is_w
             for k,v in importance:
                 print("{} : {}".format(k,v))
             score_threhold(model,test)
-
-
         return avg_score
+
         #return -avg_score
+    paramaters = {
+        "max_depth" : hp.choice("max_depth",range(10,200)),
+        "num_leaves" : hp.choice("num_leaves",range(10,1000)),
+        "min_child_samples" : hp.choice("min_child_samples",range(0,100)),
+        "subsample" : hp.uniform("subsample",0.01,1.0),
+        "colsample_bytree" : hp.uniform("colsample_bytree",0.01,1.0),
+        "lambda_l1" : hp.uniform("lambda_l1",0,5.0),
+    }
+    trials = Trials()
+    best = fmin(
+        __objective,
+        space = paramaters,
+        algo=tpe.suggest,
+        max_evals = 400,
+        trials = trials)
 
-    space = [
-        Integer(3, 200, name='max_depth'),
-        Integer(10,1000, name='num_leaves'),
-        Integer(1, 100, name='min_child_samples'), #1
-        Real(0.01, 1.0, name='subsample'),
-        Real(0.01, 1.0, name='colsample_bytree'),
-        Real(0, 20.0,name='lambda_l1'),
-    ]
-    res_gp = gp_minimize(__objective, space, n_calls=700,n_random_starts=1,xi = 0.005)
-    print(res_gp)
-    plot_convergence(res_gp)
+    print(best)
 
-def label_encoding(df,categoricals = {}):
+    #plot_convergence(res_gp)
+
+def label_encoding(df,categoricals = {},logger = None):
+    logger = logger or logging.getLogger(__name__)
+    logger.info("start label_encoding unit")
+
     categoricals = [c for c in df.columns if c in categoricals]
-    for k in tqdm(categoricals):
+    for k in tqdm(categoricals,disable = TQDM_DISABLE):
         le = LabelEncoder()
         df[k] = le.fit_transform(df[k].astype(str))
     return df
 
-def remove_unused(df,removes = []):
+def remove_unused(df,removes = [],logger = None):
+    logger = logger or logging.getLogger(__name__)
+    logger.info("start remove_unsed unit")
+
     columns = list(filter(lambda x : x not in removes,df.columns))
     return df.loc[:,columns]
 
-def preprocess(df):
+def preprocess(df,logger = None):
+    logger = logger or logging.getLogger(__name__)
+    logger.info("start preprocss unit")
+
     #df.dropna(subset = ["hr_OrderOfFinish"],inplace = True)
     #drop newbies
     df = df.loc[~df.loc[:,"hi_ConditionClass"].isin(["0s","s"]),:]
-    df = df.loc[df.loc[:,"ri_CourseCode"] == "06s",:]
+    df = add_features.parse_feature(df)
+    
+    #df = df.loc[df.loc[:,"ri_CourseCode"] == "06s",:]
+    df = df.loc[df.loc[:,"distance_category"]].isin(["sprint"])
 
     #add target variables
+    df = calc_pop_order(df)
     df = utils.generate_target_features(df)
 
     #remove illegal values
     df["hi_RunningStyle"] = df.loc[:,"hi_RunningStyle"].where(df.loc[:,"hi_RunningStyle"] != "8s","s")
-    df = add_features.parse_feature(df)
 
     print("add_runstyle_info")
     df = add_features.add_run_style_info(df)
@@ -293,7 +306,11 @@ def preprocess(df):
     df = add_features.add_course_info(df)
     return df
 
-def feature_engineering(df,numericals = [],categoricals = []):
+def feature_engineering(df,numericals = [],categoricals = [],logger = None):
+
+    logger = logger or logging.getLogger(__name__)
+    logger.info("start feature_encoding unit")
+
     print("log margin")
     df["per1_log_delta"] = np.log(1 + df["pre1_TimeDelta"])
     df["per2_log_delta"] = np.log(1 + df["pre2_TimeDelta"])
@@ -320,8 +337,8 @@ def feature_engineering(df,numericals = [],categoricals = []):
     print("normalizing with race")
     df = add_features.norm_with_race(df,categoricals)
 
-    #print("target encoding")
-    #df = add_features.target_encoding(df,categoricals)
+    print("target encoding")
+    df = add_features.target_encoding(df,categoricals)
     return df
 
 def add_speed(df):
@@ -402,20 +419,48 @@ def evaluate(df,model,features,show_results = True, mode = "argmax"):
             df.loc[g["pred"].idxmin(),"pred_bin"] = 1
     race_num = len(groups)
 
+    df["pred_order"] = df.loc[:,["hi_RaceID","pred"]].groupby("hi_RaceID")["pred"].rank(method = "min")
+    df["kaime"] = (df["pred_order"] < df["pops_order"]).astype(np.int8)
+
     win_hit = df.loc[:,"is_win"].values * df.loc[:,"pred_bin"].values
     win_hit_ratio = win_hit.sum()/race_num
     win_payback = df.loc[:,"hr_PaybackWin"].fillna(0).values * df.loc[:,"pred_bin"].values
     win_return = win_payback.sum() / (race_num * 100)
+
+    kaime = df.loc[:,"kaime"].values * df.loc[:,"pred_bin"].values
+    kaime_buy = kaime.sum()
+    win_kaime_hit = (kaime * df.loc[:,"is_win"]).sum()
+    win_kaime_payback = (kaime * df.loc[:,"hr_PaybackWin"].fillna(0)).sum()
+    win_kaime_hit_ratio = win_kaime_hit / kaime_buy
+    win_kaime_ret_ratio = win_kaime_payback / (kaime_buy * 100)
 
     place_hit = df.loc[:,"is_place"].values * df.loc[:,"pred_bin"].values
     place_hit_ratio = place_hit.sum()/race_num
     place_payback = df.loc[:,"hr_PaybackPlace"].fillna(0).values * df.loc[:,"pred_bin"].values
     place_return = place_payback.sum() / (race_num * 100)
 
+    place_kaime_hit = (kaime * df.loc[:,"is_place"]).sum()
+    place_kaime_payback = (kaime * df.loc[:,"hr_PaybackPlace"].fillna(0)).sum()
+    place_kaime_hit_ratio = place_kaime_hit / kaime_buy
+    place_kaime_ret_ratio = place_kaime_payback / (kaime_buy * 100)
+
     if show_results:
-        print("        hit        ret")
-        print("win   {:.3f},  {:.3f}".format(win_hit_ratio,win_return))
-        print("place {:.3f}   {:.3f}".format(place_hit_ratio,place_return))
+        print("        hit      ret")
+        print("win     {:.3f},  {:.3f}".format(win_hit_ratio,win_return))
+        print("win_k   {:.3f},  {:.3f}".format(win_kaime_hit_ratio,win_kaime_ret_ratio))
+        print("place   {:.3f}   {:.3f}".format(place_hit_ratio,place_return))
+        print("place_k {:.3f},  {:.3f}".format(place_kaime_hit_ratio,place_kaime_ret_ratio))
+    result_dict = {
+        "win_hit":"",
+        "win_ret":"",
+        "place_hit":"",
+        "place_ret":"",
+        "win_k_hit" : "",
+        "win_k_ret" : "",
+        "place_k_hit" :"",
+        "place_k_ret" : "",
+
+    }
     return win_hit_ratio,place_hit_ratio,win_return,place_return
 
 def top1k(df):
@@ -528,7 +573,7 @@ def calc_pop_order(df):
     df[key] = df.loc[:,key].where(df.loc[:,key] >= 1,99)
     df["pops_tmp"] = 1/df.loc[:,key]
     group = df.loc[:,["hi_RaceID","pops_tmp"]].groupby("hi_RaceID")
-    for n,g in tqdm(group):
+    for n,g in tqdm(group, disable = TQDM_DISABLE):
         g.sort_values(by = "pops_tmp",ascending = False,inplace = True)
         g.insert(0, 'pops_order', range(1,len(g)+1))
         df.loc[g.index,"pops_order"] = g.loc[:,"pops_order"]

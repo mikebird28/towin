@@ -35,7 +35,6 @@ def main():
     categoricals,numericals = utils.cats_and_nums(columns,columns_dict)
     categoricals = categoricals + add_features.additional_categoricals()
     removes = utils.load_removes("remove.csv")
-    #targets = utils.load_targets("target.csv")
     years = range(2011,2018+1)
     df = pd.read_csv("./data/output.csv",dtype = columns_dict,usecols = columns)
 
@@ -45,21 +44,24 @@ def main():
     p = p.add(label_encoding,params = {"categoricals":categoricals}, name = "lenc", cache_format = "feather")
     p = p.add(choose_columns,params = {"removes" : removes,"process_features" : PROCESS_FEATURES}, name = "remove", cache_format = "feather")
     p = p.add(choose_year,params = {"years" : years}, name = "years", cache_format = "feather")
-    p = p.add(feature_engineering, params = {"categoricals" : categoricals}, name = "feng", cache_format = "feather")
     p = p.add(normalize, params = {"process_features" : PROCESS_FEATURES, "categoricals" : categoricals}, name = "norm", cache_format = "feather")
-    p = p.add(inp_to_race,params = {"categoricals" : categoricals, "num_per_race" : 5}, name = "to_races", cache_format = "feather")
-    p = p.add(inp_to_dict,params = {"categoricals" : categoricals, "target" : "margin"}, name = "to_dict", cache_format = "pickle")
-    x1,x2,y1,y2 = p.fit_gene(df,verbose = True)
-    del(p,df);gc.collect()
+    df = p.fit_gene(df,verbose = True)
 
+    key = "hr_OrderOfFinish"
+    y = df["hr_OrderOfFinish"]
+    x = df.drop(key,axis = 1)
+    x1,y1,x2,y2 = split_with_year(x,y,year = 2013)
+
+    del(p,df);gc.collect()
+    x1 = to_dict(x1)
+    x2 = to_dict(x2)
     x1 = filter_df(x1)
     x2 = filter_df(x2)
     nn(x1,x2,y1,y2)
 
 def nn(x1,x2,y1,y2):
-    y1 = np.log(y1 + 1)
-    y2 = np.log(y2 + 1)
-    print(x1.shape)
+    #y1 = np.log(y1 + 1)
+    #y2 = np.log(y2 + 1)
     features = sorted(x1.keys())
 
     inputs = []
@@ -100,25 +102,12 @@ def nn(x1,x2,y1,y2):
     dropout_rate = 0.2
     activation = "relu"
 
-    x = Conv2D(layer_size,[1,feature_size],padding = "valid", kernel_regularizer= keras.regularizers.l2(0.01))(x)
-    x = Activation(activation)(x)
     x = BatchNormalization(axis = bn_axis,momentum = momentum)(x)
-    x = Dropout(dropout_rate)(x)
 
-    for i in range(layer_num):
-        x = Conv2D(layer_size,[1,1],padding = "valid",kernel_regularizer= keras.regularizers.l2(0.01))(x)
-        x = Activation(activation)(x)
-        x = BatchNormalization(axis = bn_axis,momentum = momentum)(x)
-        x = Dropout(dropout_rate)(x)
-
-    x = Conv2D(1,[1,1],padding = "valid",kernel_regularizer= keras.regularizers.l2(0.01))(x)
-    #x = Conv2D(layer_size,[1,1],padding = "valid")(x)
-    x = Flatten()(x)
-
-    #x = Dense(units = 1024)(x)
-    #x = Activation(activation)(x)
-    #x = Dense(units = 18)(x)
-    #x = Activation("softmax")(x)
+    x = Dense(units = 1024)(x)
+    x = Activation(activation)(x)
+    x = Dense(units = 18)(x)
+    x = Activation("softmax")(x)
 
     model = Model(inputs = inputs,outputs = x)
 
@@ -133,48 +122,14 @@ def nn(x1,x2,y1,y2):
     print(model.predict(x2)[0])
     return model
 
-def rank_sigmoid(y_true,y):
-    dim0 = K.shape(y)[0]
-    loss = tf.fill(tf.stack([dim0]), 0.0)
-
-    label_gain = 10
-    label_gain = 1
-    pred_gain = 5.0
-    pred_gain = 1.0
-    for i in range(18-1):
-        for j in range(i+1,18):
-            l = K.sigmoid(pred_gain * (y[:,i] - y[:,j]))
-            l_true = K.sigmoid(label_gain * (y_true[:,i] - y_true[:,j]))
-            entropy = -l_true * K.log(K.clip(l,1e-8,1.0)) - (1 - l_true) * K.log(K.clip(1 - l,1e-8,1.0)) 
-            loss = loss + entropy  
-    loss = K.reshape(loss,[-1,1])/18
-    return loss
-
-def kokon_loss(y_true,y):
-    dim0 = K.shape(y)[0]
-    loss = tf.fill(tf.stack([dim0]),0.0)
-    for i in range(18):
-        for j in range(18):
-        #for j in range(i+1,18):
-            softplus = K.softplus(y[:,j] - y[:,i])
-            tanh = K.tanh(y_true[:,j] - y_true[:,i])
-            loss = loss + K.clip(18 + softplus * tanh,0.0,18.0)
-    loss = K.reshape(loss,[-1,1])/(18*18)
-    return loss
-
-def rank_accuracy(y_true,y):
-    bool_y_true = K.cast(K.equal(y_true,0),"int32")
-    #bool_y_true = K.cast(K.equal(y_true,1),"int32")
-    y_pred = 1 - K.sigmoid(y)
-    return keras.metrics.categorical_accuracy(bool_y_true, y_pred)
-
-def margin_accuracy(y_true,y_pred):
-    y_bin = K.cast(K.equal(y_true,0.0),"int32")
-    return keras.metrics.categorical_accuracy(y_bin, -y_pred)
-
-def rank_loss(y_true,y):
-    res = -y_true * K.log(y) + (1 - y_true) * K.log(1 - y)
-    return res
+def to_dict(df,categoricals):
+    dic = {}
+    numericals = []
+    dic["main"] = to_matrix(df.loc[:,numericals])
+    for c in categoricals:
+        if c in df.columns:
+            dic[c] = df[c]
+    return dic
 
 def emb_dim(inp_dim):
     if inp_dim < 5:
@@ -183,99 +138,6 @@ def emb_dim(inp_dim):
         return 10
     else:
         return 20
-
-def inp_to_race(df,categoricals = [],num_per_race = 3,logger = None):
-    #init logger
-    logger = logger or logging.getLogger(__name__)
-    logger.debug("inp_to_race : function called")
-
-    key = "hi_RaceID"
-    groups = df.groupby(key)
-    
-    max_group_size = 18
-    total = len(groups)
-    size = len(groups) * max_group_size
-    df["is_padded"] = 0
-
-    columns = df.columns
-    df_new = pd.DataFrame(np.zeros((size, len(columns))),columns = columns)
-
-    idx_count = 0
-
-    categoricals = [c for c in df.columns if c in categoricals]
-    numericals = [c for c in df.columns if c not in categoricals]
-    #df.loc[:,numericals] = df.loc[:,numericals].clip(-10,10)
-    #print(df.loc[:,numericals].head())
-
-    if "ri_Year" not in numericals:
-        numericals.append("ri_Year")
-
-    for name,group in tqdm(groups):
-        start = idx_count
-        end = idx_count + len(group)
-        logger.debug("inp_to_race : grouped {}, original race size was {}".format(name,len(group)))
-
-        df_new.iloc[start:end,:] = group.values
-        mean = group[numericals].mean().values
-        df_new.loc[end:idx_count + max_group_size,numericals] = mean
-        df_new.loc[end:idx_count + max_group_size,"hr_OrderOfFinish"] = 19
-        df_new.loc[end:idx_count + max_group_size,"is_win"] = 0
-        df_new.loc[end:idx_count + max_group_size,"is_place"] = 0
-        df_new.loc[end:idx_count + max_group_size,"is_padded"] = 1
-
-        df_new.loc[start:idx_count + max_group_size] = df_new.loc[start:idx_count + max_group_size].sample(frac = 1.0).values
-        #print(df_new.loc[start:idx_count + max_group_size].head(18))
-        idx_count += max_group_size 
-
-    del(df,groups);
-    gc.collect()
-    df_new.index = pd.MultiIndex.from_product([range(total),range(max_group_size)])
-    return df_new
-
-def inp_to_dict(df, categoricals = {}, target = "is_win",logger = None):
-    logger = logger or logging.getLogger(__name__)
-    logger.debug("inp_to_dict : function_called")
-
-    y = df.loc[:,[target]]
-    df.drop(target,inplace = True, axis = 1)
-    #x1,x2,y1,y2 = train_test_split(df,y,test_size = 0.1)
-    x1,x2,y1,y2 = split_with_year(df,y,2017)
-    del(df,y)
-    gc.collect()
-
-    x1_dic = {}
-
-    remove = extract_columns(x1,PROCESS_FEATURES)
-    x1.drop(remove,inplace = True, axis = 1)
-    x2.drop(remove,inplace = True, axis = 1)
-    numericals = [c for c in x1.columns if c not in categoricals]
-
-    x1_dic["main"] = to_matrix(x1.loc[:,numericals])
-    for c in x1.columns:
-        if c not in categoricals:
-            continue
-        mtx = to_matrix(x1.loc[:,[c]])
-        mtx = mtx.reshape([mtx.shape[0],mtx.shape[1]])
-        x1_dic[c] = mtx
-    y1 = to_matrix(y1)
-    y1 = y1.reshape([y1.shape[0],y1.shape[1]])
-    y1 = pd.DataFrame(y1)
-    del(x1)
-    gc.collect()
-
-    x2_dic = {}
-    x2_dic["main"] = to_matrix(x2.loc[:,numericals])
-    for c in x2.columns:
-        if c not in categoricals:
-            continue
-        mtx = to_matrix(x2.loc[:,[c]])
-        mtx = mtx.reshape([mtx.shape[0],mtx.shape[1]])
-        x2_dic[c] = mtx
-    y2 = to_matrix(y2)
-    y2 = y2.reshape([y2.shape[0],y2.shape[1]])
-    del(x2)
-    gc.collect()
-    return x1_dic,x2_dic,y1,y2
 
 def fillna(df,categoricals = [],mode = "race", logger = None):
     logger = logger or logging.getLogger(__name__)
@@ -332,8 +194,6 @@ def fillna(df,categoricals = [],mode = "race", logger = None):
     nan_rate = 1 - df.isnull().sum().sum()/float(df.size)
     logger.debug("nan rate check at end of fillna : {}".format(nan_rate))
     return df
-
-
 
 def normalize(df,categoricals = [], process_features = None, logger = None):
     logger = logger or logging.getLogger(__name__)
@@ -549,7 +409,6 @@ def split_with_year(x,y,year):
 
     del(con)
     gc.collect()
-    #ret train_x,test_x,train_y,test_y
     return (train.loc[:,x.columns],test.loc[:,x.columns],train.loc[:,y.columns],test.loc[:,y.columns])
 
 def optimize_type(df,categoricals):
@@ -575,63 +434,6 @@ def to_matrix(df):
     dim2 = len(df.index.get_level_values(1).unique())
     result = df.values.reshape((dim1, dim2, df.shape[1]))
     return result
-
-def optimize_params(df,categoricals):
-    df = df[df["ri_Year"] >= 2013]
-    metrics = "auc"
-    count = 0
-
-    def __objective(values):
-        nonlocal count
-        count += 1
-        n_folds = 5 
-        num_boost_round = 20000
-        early_stopping_rounds = values[6]
-
-        #kf = KFold(n = train_x.shape[0],n_folds = n_folds,random_state = 32,shuffle = True)
-        kf = RaceKFold(df,n_folds)
-     
-        scores = []
-        for i,(train,test) in enumerate(kf):
-            x1,y1 = filter_df(train)
-            x2,y2 = filter_df(test)
-
-            features = x1.columns
-            cats = list(filter(lambda x: x in categoricals,features))
-
-            dtrain = lgb.Dataset(x1, label=y1,categorical_feature = cats)
-            dtest  = lgb.Dataset(x2, label=y2,categorical_feature = cats)
-            model = lgb.train(
-                params,
-                dtrain,
-                valid_sets=[dtrain, dtest],
-                valid_names=['train','valid'],
-                evals_result={},
-                num_boost_round=num_boost_round,
-                early_stopping_rounds=early_stopping_rounds,
-                verbose_eval=False, feval=None
-            )
-            score = model.best_score["valid"][metrics]
-            scores.append(score)
-            print("[{}] score ... {}".format(count,score))
-
-        avg_score = sum(scores)/len(scores)
-        print("avg_score : {}".format(avg_score))
-        print()
-        return -avg_score
-
-    space = [
-        Integer(3, 5, name='max_depth'),
-        Integer(10, 300, name='num_leaves'),
-        Integer(50, 80, name='min_child_samples'), #1
-        Real(0.01, 1.0, name='subsample'),
-        Real(0.01, 1.0, name='colsample_bytree'),
-        Real(0, 5.0,name='lambda_l1'),
-        Integer(50, 200, name='early_stopping_rounds'), #1
-    ]
-    res_gp = gp_minimize(__objective, space, n_calls=700,n_random_starts=1,xi = 0.005)
-    print(res_gp)
-    plot_convergence(res_gp)
 
 def check_dataframe(df,categoricals):
     for f in df.columns:

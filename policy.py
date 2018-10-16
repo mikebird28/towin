@@ -6,16 +6,18 @@ from sklearn.preprocessing import LabelEncoder
 import keras
 from keras.models import Sequential,Model
 from keras.callbacks import EarlyStopping,ModelCheckpoint
-from keras.layers import Dense,Activation,Dropout,Input,Conv2D,Concatenate,SpatialDropout1D,LSTM
+from keras.layers import Dense,Activation,Dropout,Input,Conv2D,Concatenate,SpatialDropout1D,LSTM,Multiply
 from keras.layers.normalization import BatchNormalization
 from keras.layers.core import Flatten,Lambda,Reshape
 from keras.layers.embeddings import Embedding
 from keras import regularizers
+from keras.utils import np_utils
+from keras import optimizers
 import gc
 from keras import backend as K
-import utils
 import logging
 import tensorflow as tf
+import random
 #from utils import cats_and_nums, load_removes, load_dtypes
 
 PROCESS_FEATUES = ["hi_RaceID","ri_Year","hr_OrderOfFinish"]
@@ -30,146 +32,161 @@ def main():
     test = pd.read_csv("./data/test_pred.csv",usecols = columns)
     #del(train,test);gc.collect()
 
-    p = preprep.Preprep("./cache_files/playout")
+    p = preprep.Preprep("./cache_files/rf")
     p = p.add(fillna(),name = "fillna")
     p = p.add(normalize(), name = "norm", cache_format = "feather")
-    #p = p.add(inp_to_race, name = "to_races", cache_format = "feather")
     df = p.fit_gene(df,verbose = True)
-
-    df = upsampling(df,target = "hr_PaybackPlace")
-    df = inp_to_race(df)
-
     test_df = p.gene(test)
-    print(test_df.describe())
-    del(p);gc.collect()
+    
+    target_variabe = "hr_PaybackPlace"
+    #target_variabe = "hr_PaybackWin"
 
-
-    target = "hr_PaybackWin"
-    x1 = to_matrix(df.loc[:,["li_WinOdds","pred","is_padded"]])
-    y1 = to_matrix(df.loc[:,[target]],for_y = True)
-    y1e = to_matrix(df.loc[:,[target+"_eval"]],for_y = True)
-    x2 = to_matrix(test_df.loc[:,["li_WinOdds","pred","is_padded"]])
-    y2 = to_matrix(test_df.loc[:,[target]],for_y = True)
-    y2e = to_matrix(test_df.loc[:,[target+"_eval"]],for_y = True)
- 
+    batch_size = 100000
+    swap_interval = 5
+    log_interval = 10
     model = nn()
-    model.fit(x1,y1,epochs = 6,batch_size = 32, validation_data = [x2,y2])
-    print("inference finished")
-    evaluate(x1,y1e,model)
-    evaluate(x2,y2e,model)
-    #gene = batch_generator(df,10000,100)
+    fit_func = fit(model)
+    tmp_model = model
+    race_id = pd.Series(df["hi_RaceID"].unique())
+    for i in range(batch_size):
+        target_ids = race_id.sample(n = 128).values
 
-    """
-    for x,y in gene:
-        #x_main = x[0]
-        #y_main = softmax(y[0] + playout(x,y))
-        #print(y_main)
+        x_df = []
+        y_df = []
+        actions = []
+        for idx in target_ids:
+            race = df.loc[df.loc[:,"hi_RaceID"] == idx,:]
+            train_record = race.sample(n = 1)
+            x_df.append(to_trainable(train_record))
+            train_idx = train_record.index[0]
+            #others = race.loc[race.index != train_idx,:]
+            #rewards = get_rewards(tmp_model,others,target = target_variabe)
+            hit_reward = train_record.loc[:,target_variabe].values[0]
+            #hit_reward += rewards
+            y = pd.Series([1, hit_reward])
+            #y = pd.Series([1 + rewards, hit_reward])
+            #y = (y - len(race)).clip(0,None)
+            #y = y - len(race)
+            y = y - y.mean()
+            y_df.append(y)
 
-        model.fit(x,y,epochs = 1,batch_size = 32)
-        #model.fit(x,y,epochs = 1,batch_size = 32,validation_data = (x2,y2))
-    """
+            pred = np.squeeze(model.predict(to_trainable(train_record)))
+            actions.append(np.random.choice(2,p = pred))
+        
+        x_df = pd.concat(x_df).values
+        actions = pd.DataFrame(actions)
+        actions = np_utils.to_categorical(actions, num_classes=2)
 
-def evaluate(x,y,model):
-    pred = model.predict(x)
-    print(pred)
-    bin_pred = np.zeros_like(pred)
-    #bin_pred[np.arange(len(pred)),pred.argmax(axis = 1)] = 1
-    bin_pred[np.arange(len(pred)),pred.argmax(axis = 1)] = 1
-    bin_pred = (pred > 0.2).astype(int)
+        y_df = pd.concat(y_df,axis = 1).T.values
+        y_df = (actions * y_df).sum(axis = 1)
+        #print(y_df)
+        fit_func([x_df,actions,y_df])
 
-    payoff_matrix = y
-    hit_matrix = np.clip(y,0,1)
+        #rewards = get_rewards(model,test_df)
+        if i % swap_interval == 0:
+            tmp_model = keras.models.clone_model(model)
+            tmp_model.set_weights(model.get_weights())
+
+        if i % log_interval == 0:
+            print(i)
+            evaluate(model,df)
+            evaluate(model,test_df)
+            print()
+
+def fit(model):
+    action_prob_placeholder = model.output
+    action_onehot_placeholder = K.placeholder(shape=(None, 2), name="action")
+    discount_reward_placeholder = K.placeholder(shape=(None,),name="reward")
+    action_prob = K.sum(action_prob_placeholder * action_onehot_placeholder, axis=1)
+
+    log_action_prob = K.log(action_prob)
+    loss = - log_action_prob * discount_reward_placeholder
+    loss = K.mean(loss)
+
+    adam = optimizers.Adam()
+    updates = adam.get_updates(params=model.trainable_weights,loss=loss)
+    train_fn = K.function(inputs=[model.input,action_onehot_placeholder,discount_reward_placeholder],outputs=[],updates=updates)
+    return train_fn
+
+def to_trainable(df):
+    x = df.loc[:,["li_WinOdds","pred"]]
+    return x
+
+def get_action(model,df,threhold = 0.95,pred = None):
+    #avoid duplicate caculation
+    if pred is None:
+        pred = model.predict(to_trainable(df))
+        pred = np.squeeze(pred)
+
+    actions = np.zeros_like(pred)
+    for i in range(len(pred)):
+        action_prob = random.random()
+        if action_prob > threhold:
+            #choose random action
+            actions[i] = np.random.choice(2,p = pred[i])
+        else:
+            #choose greedy action
+            row_max = pred[i].max()
+            actions[i] = np.where(pred[i] == row_max,1,0)
+    return actions
+
+def get_rewards(model,df,target = "hr_PaybackWin",iter_times = 30):
+    M = 10
+    reward_sum = 0
+    pred = model.predict(to_trainable(df))
+    pred = np.squeeze(pred)
+
+    reward_matrix = pd.DataFrame(np.ones([len(df),2]))
+    reward_matrix.iloc[:,1] = df.loc[:,target].values
+
+    for i in range(M):
+        bin_pred = get_action(model,df,threhold = 0.1,pred = pred)
+        reward_sum += (reward_matrix * bin_pred).sum().sum()
+
+    rewards = reward_sum/M
+    return rewards 
+
+
+def evaluate(model,df,eval_key = "hr_PaybackPlace_eval"):
+    pred = model.predict(to_trainable(df))
+    row_maxes = pred.max(axis=1).reshape(-1, 1)
+    bin_pred = pd.DataFrame(np.where(pred == row_maxes, 1, 0))
+    bin_pred = bin_pred.iloc[:,1]
+
+    payoff_matrix = df.loc[:,eval_key]
+    hit_matrix = np.clip(payoff_matrix,0,1)
 
     ret = np.multiply(bin_pred,payoff_matrix)
     hit = np.multiply(bin_pred,hit_matrix)
 
     ret_total = np.sum(ret)
     hit_total = np.sum(hit)
-    race_total = bin_pred.sum().sum()
-    #race_total = len(y)
-    print("total")
-    print(race_total)
-    print("ret")
-    print(ret_total/race_total)
-    print("hit")
-    print(hit_total/race_total)
+
+    race_total = len(bin_pred)
+    buy_total = bin_pred.sum()
+
+    hit_ratio = hit_total/buy_total
+    ret_ratio = ret_total/buy_total
+    txt = "buy {}/{}, hit : {:.3f}, ret : {:.3f}".format(buy_total,race_total,hit_ratio,ret_ratio)
+    print(txt)
 
 def nn():
-
-    activation = "relu"
-    dropout_rate = 0.4
-    inputs = Input(shape = (18,3),dtype = "float32",name = "input")
-    x = Reshape([18,3,1])(inputs)
-
-    x = Conv2D(3,[1,3],padding = "valid",kernel_regularizer = regularizers.l2(0.005))(x)
-    x = Activation(activation)(x)
-    #x = BatchNormalization(axis = 2)(x)
-    x = Dropout(dropout_rate)(x)
-
-    """
-    for i in range(4):
-        x = Conv2D(8,[1,1],padding = "valid")(x)
-        x = Activation(activation)(x)
-        #x = BatchNormalization(axis = 2)(x)
-        x = Dropout(dropout_rate)(x)
-    """
-
-    x = Conv2D(1,[1,1],padding = "valid",kernel_regularizer = regularizers.l2(0.005))(x)
-    x = Flatten()(x)
+    inputs = Input(shape = (2,),dtype = "float32",name = "input")
+    l2_coef = 0.05
+    x = Dense(units = 4, kernel_regularizer = regularizers.l2(l2_coef))(inputs)
     x = Activation("relu")(x)
+    #x = Dense(units = 8)(inputs)
+    #x = Activation("relu")(x)
+    #x = Dense(units = 4,kernel_regularizer = regularizers.l2(l2_coef))(x)
+    #x = Activation("relu")(x)
+
+    x = Dense(units = 2,kernel_regularizer = regularizers.l2(l2_coef))(x)
+    x = Activation("softmax")(x)
 
     model = Model(inputs = inputs,outputs = x)
     opt = keras.optimizers.Adam(lr=0.01,epsilon = 1e-4)
-    model.compile(loss = huber_loss ,optimizer=opt, metrics = ["mse"])
-    #model.fit(x1,y1,epochs = 200,batch_size = 32,validation_data = (x2,y2))
+    model.compile(loss = log_loss, optimizer=opt, metrics = ["mse"])
     return model
-
-def emb_dim(inp_dim):
-    if inp_dim < 10:
-        return inp_dim
-    elif inp_dim < 20:
-        return 10
-    else:
-        return 20
-
-def inp_to_race(df,logger = None):
-    #init logger
-    logger = logger or logging.getLogger(__name__)
-    logger.debug("inp_to_race : function called")
-
-    key = "hi_RaceID"
-    groups = df.groupby(key)
-
-    max_group_size = 18
-    total = len(groups)
-    size = len(groups) * max_group_size
-    df["is_padded"] = 0
-
-    columns = df.columns
-    df_new = pd.DataFrame(np.zeros((size, len(columns))),columns = columns)
-
-    idx_count = 0
-
-    for name,group in tqdm(groups):
-        start = idx_count
-        end = idx_count + len(group)
-        logger.debug("inp_to_race : grouped {}, original race size was {}".format(name,len(group)))
-
-        df_new.iloc[start:end,:] = group.values
-        mean = group.mean().values
-        df_new.loc[end:idx_count + max_group_size,:] = mean
-        df_new.loc[end:idx_count + max_group_size,"hr_PaybackWin"] = 0
-        df_new.loc[end:idx_count + max_group_size,"hr_PaybackPlace"] = 0
-        df_new.loc[end:idx_count + max_group_size,"is_padded"] = 1
-
-        df_new.loc[start:idx_count + max_group_size] = df_new.loc[start:idx_count + max_group_size].sample(frac = 1.0).values
-        #print(df_new.loc[start:idx_count + max_group_size].head(18))
-        idx_count += max_group_size 
-
-    del(df,groups);
-    gc.collect()
-    df_new.index = pd.MultiIndex.from_product([range(total),range(max_group_size)])
-    return df_new
 
 class fillna(preprep.Operator):
     def __init__(self):
@@ -190,8 +207,8 @@ class fillna(preprep.Operator):
         df[df.isnull()] = np.nan
         df.loc[:,"hr_PaybackWin_eval"] = df.loc[:,"hr_PaybackWin"].copy().fillna(0)/100
         df.loc[:,"hr_PaybackPlace_eval"] = df.loc[:,"hr_PaybackPlace"].copy().fillna(0)/100
-        df.loc[:,"hr_PaybackWin"] = (df.loc[:,"hr_PaybackWin"].fillna(0)/100).clip(0.0,50.0)
-        df.loc[:,"hr_PaybackPlace"] = (df.loc[:,"hr_PaybackPlace"].fillna(0)/100).clip(0.0,50.0)
+        df.loc[:,"hr_PaybackWin"] = (df.loc[:,"hr_PaybackWin"].fillna(0)/100).clip(0.0,30.0)
+        df.loc[:,"hr_PaybackPlace"] = (df.loc[:,"hr_PaybackPlace"].fillna(0)/100).clip(0.0,30.0)
 
         nan_rate = 1 - df.isnull().sum().sum()/float(df.size)
         logger.debug("nan rate check at start of fillna : {}".format(nan_rate))
@@ -274,14 +291,6 @@ def filter_df(df):
                 del(df[k])
     return df
 
-"""
-def evaluate(df,y,model,features):
-    df = pd.concat([df,y],axis = 1)
-    df["pred"] = model.predict(filter_df(df[features]))
-    is_hit = df[["hi_RaceID","pred","hr_OrderOfFinish"]].groupby("hi_RaceID").apply(_is_win)
-    score = sum(is_hit)/len(is_hit)
-    print(score)
-"""
 
 def _is_win(df):
     is_hit = df["pred"].idxmax() == df["hr_OrderOfFinish"].idxmax()
@@ -367,22 +376,9 @@ def softmax(x):
 def huber_loss(y_true, y_pred):
     return tf.losses.huber_loss(y_true,y_pred)
 
-def upsampling(df,target):
-    value_1 = df.loc[df.loc[:,target] != 0.0,:]
-    value_0 = df.loc[df.loc[:,target] == 0.0,:]
-    print(value_1)
-    print(value_0)
-    size_1 = len(value_1)
-    size_0 = len(value_0)
-    print(size_0)
-    print(size_1)
-
-    upsample_rate = size_0/size_1
-    value_1 = value_1.sample(frac = upsample_rate,replace = True)
-    df = pd.concat([value_0,value_1],axis = 0)
-    del(value_1,value_0);gc.collect()
-    df = df.sample(frac = 1.0).reset_index(drop = True)
-    return df
+def log_loss(y_true, y_pred):
+    y_pred = tf.clip_by_value(y_pred,1e-8,1)
+    return -tf.reduce_mean(tf.multiply(y_true,tf.log(y_pred)))
 
 if __name__ == "__main__":
     main()

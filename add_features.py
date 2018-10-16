@@ -366,30 +366,38 @@ def add_run_style_info(df):
     return df
 
 def target_encoding(df,cats):
-    remove_features = [
-        "ri_Discipline",
-        "ri_CourseCode","ri_InOut","ri_LeftrRight","li_WeatherCode","li_FieldCode",
-        "ri_RaceGrade","hi_SexCode",
-        "pre1_LeftRight","pre2_LeftRight","pre3_LeftRight",
-        "pre1_WeatherCode","pre2_WeatherCode","pre3_WeatherCode",
-        "pre1_Discipline","pre2_Discipline","pre3_Discipline",
-        "pre1_RacePace","pre3_RacePace","pre3_RacePace",
-        "pre1_InOut","pre2_InOut","pre3_InOut",
-        "pre1_CourseCode","pre2_CourseCode","pre3_CourseCode",
-    ]
-    cats = [c for c in cats if c in df.columns]
-    for i,c in tqdm(enumerate(cats)):
-        if c in remove_features:
-            continue
-        #df = _target_encode(df,c,"is_place")
-        df = _target_encode(df,c,"margin")
-    return df
+    race_info = ["ri_Discipline","distance_category","li_FieldCode","li_WeatherCode","hi_FrameNumber"]
+    horse_info = ["hi_RunningType","bi_MFPedigreeCode2","bi_FPedigreeCode2","hoof_type","hoof_size","hi_RunningStyle","hi_SexCode","bi_FatherName"]
+    prefixes = ["ri","hi","hr","li"]
 
-def _target_encode(df,key,target,k = 100, f = 1, smoothing = True):
+    for ri in tqdm(race_info):
+        for hi in horse_info:
+            if (ri not in df.columns) or (hi not in df.columns):
+                continue
+            ri_split = ri.split("_")
+            if ri_split[0] in prefixes:
+                ri_name = "_".join(ri_split[1:]).lower()
+            else:
+                ri_name = ri.lower()
+            hi_split = hi.split("_")
+            if hi_split[0] in prefixes:
+                hi_name = "_".join(hi_split[1:]).lower()
+            else:
+                hi_name = hi.lower()
+            tmp_key = ri_name + hi_name + "_tmps"
+            te_key = ri_name + "_" + hi_name + "_te"
+            df[tmp_key] = df[hi].astype(str) + "_" +df[ri].astype(str)
+            df = _target_encode(df,tmp_key,"is_place",new_key = te_key)
+            df = _target_encode(df,tmp_key,"margin",new_key = te_key)
+            df.drop(tmp_key,axis = 1,inplace = True)
+    return df
+ 
+def _target_encode(df,key,target,new_key = None,k = 500, f = 30, smoothing = True):
     #k (int) : minimum samples to take category average into account
     #f (int) : smoothing effect to balance categorical average vs prior
 
-    new_key = key + "_te"
+    if new_key is None:
+        new_key = key + "_te"
     group = df[[key,target]].groupby(key)
     counts = group[target].mean().reset_index()
     counts.columns = [key,new_key]

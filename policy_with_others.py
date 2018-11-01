@@ -10,13 +10,13 @@ from keras.layers import Dense,Activation,Dropout,Input,Conv2D,Concatenate,Spati
 from keras.layers.normalization import BatchNormalization
 from keras import regularizers
 from keras import optimizers
-import time
 import gc
 from keras import backend as K
 import logging
 import tensorflow as tf
 import random
 import utils
+from multiprocessing import Pool
 
 #PROCESS_FEATUES = ["hi_RaceID","ri_Year","hr_OrderOfFinish"]
 PROCESS_FEATURE = utils.process_features() + ["hr_PaybackPlace_eval","hr_PaybackWin_eval"]
@@ -49,19 +49,19 @@ def main():
     df = remove_irregal(df,target = target_variable)
 
     #prepare datasets
-    #train_x = to_trainable(df)
-    #train_y = df.loc[:,eval_variable]
+    train_x = to_trainable(df)
+    train_y = df.loc[:,eval_variable]
     test_x = to_trainable(test_df)
     test_y = test_df.loc[:,eval_variable]
     bg = BatchGenerator(df,target_variable)
     del(p,df,test_df);gc.collect()
 
-    feature_size = test_x.shape[0]
+    feature_size = train_x.shape[0]
 
     epoch_size = 100000
-    batch_size = 512
+    batch_size = 128
     swap_interval = 1
-    log_interval = 100
+    log_interval = 500
 
     model = nn()
 
@@ -75,15 +75,14 @@ def main():
         race_x,race_y = bg.get_batch(batch_size)
 
         for j in range(batch_size):
-            x = race_x[j].values
-            y = race_y[j].values
-            target_idx = np.random.randint(0,len(x))
-
-            target_row = x[target_idx]
+            x = race_x[j]
+            y = race_y[j]
+            target_row = x.sample(n = 1)
+            target_idx = target_row.index[0]
             x_df[j,:] = target_row
-            x_dash = np.delete(x,target_idx,0)
-            y1 = y[target_idx]
-            y2 = np.delete(y,target_idx,0)
+            x_dash = x.loc[x.index != target_idx,:]
+            y1 = y.loc[y.index == target_idx]
+            y2 = y.loc[y.index != target_idx]
             y_df[j,:] = get_rewards(tmp_model,target_row,x_dash,y1,y2)
 
         model.fit(x_df,y_df,verbose = 0, epochs = 1,batch_size = batch_size)
@@ -93,9 +92,12 @@ def main():
 
         if i % log_interval == 0:
             print(i)
-            #evaluate(model,train_x,train_y)
+            evaluate(model,train_x,train_y)
             evaluate(model,test_x,test_y)
             print()
+
+def get_rewards_wrapped(queue,i,model,target_row,x_dash,y1,y2):
+    queue.put([i,get_rewards(model,target_row,x_dash,y1,y2)])
 
 def fit(model):
     action_prob_placeholder = model.output
@@ -157,47 +159,40 @@ def pretrain(model,train_x,train_rew,test_x,test_rew):
 def get_action(model,df,threhold = 0.95,pred = None):
     #avoid duplicate caculation
     if pred is None:
-        pred = model.predict(df)
+        pred = model.predict(to_trainable(df))
         pred = np.squeeze(pred)
-    return sample_from_softmax(pred)
 
+    actions = np.zeros_like(pred)
+    for i in range(len(pred)):
+        action_prob = random.random()
+        if action_prob > threhold:
+            #choose random action
+            actions[i] = np.random.choice(2,p = pred[i])
+        else:
+            #choose greedy action
+            row_max = pred[i].max()
+            actions[i] = np.where(pred[i] == row_max,1,0)
+    return actions
 
-def sample_from_softmax(array):
-    s = array.cumsum(axis=1)
-    r = np.random.rand(array.shape[0])
-    k = (s.T < r).sum(axis=0)
-    ret = np.zeros_like(array)
-    ret[np.arange(array.shape[0]),k] = 1
-    return ret
-
-def calc_time(func):
-    def wrapper(*args,**kwargs):
-        start = time.time()
-        ret = func(*args,**kwargs)
-        end = time.time()
-        print("elapsed time - {}".format(start - end))
-        return ret
-    return wrapper
-
-def get_rewards(model, x, x_dash, y, y_dash,iter_times = 20):
+def get_rewards(model, x, x_dash, y, y_dash,iter_times = 10):
     reward_sum = np.zeros(shape = [2])
     action_reward = np.ones(shape = [2])
-    action_reward[1] = y
+    action_reward[1] = y.values
 
     pred = model.predict(x_dash)
     pred = np.squeeze(pred)
     reward_matrix = np.ones([len(x_dash),2])
-    reward_matrix[:,1] = y_dash
-    #reward_matrix[:,1] = y_dash.values
+    reward_matrix[:,1] = y_dash.values
 
     for i in range(iter_times):
         horse_number = len(x_dash) + 1
         bin_pred = get_action(model,x_dash,threhold = 0.5,pred = pred)
         reward = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
-        reward = np.where(reward > 0.4, 1 ,0)
+        reward = np.where(reward > 0.1, 1 ,0)
         reward_sum += reward
 
     reward_mean = reward_sum/iter_times
+    #reward_mean = softmax(reward_mean)
     return reward_mean 
 
 def softmax(z):
@@ -208,7 +203,7 @@ def softmax(z):
 
 def evaluate(model,x,y):
     pred = model.predict(x)
-    print(pred[0:20,:])
+    print(pred[0:10,:])
     row_maxes = pred.max(axis=1).reshape(-1, 1)
 
     bin_pred = np.where(pred == row_maxes, 1, 0)
@@ -232,28 +227,21 @@ def evaluate(model,x,y):
     print(txt)
 
 def nn():
-    inputs = Input(shape = (202,),dtype = "float32",name = "input")
-    x = inputs
+    inputs = Input(shape = (202,),dtype = "float32",name = "main")
+    others = Input(shape = (18, 202,),dtype = "float32",name = "others")
     l2_coef = 2e-4
     UNIT_SIZE = 512
 
+    x = inputs
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
     x = Dropout(0.2)(x)
 
-    for i in range(2):
-        tmp = x
-        x = BatchNormalization()(x)
-        x = Activation("relu")(x)
-        x = Dense(units = UNIT_SIZE//2, kernel_regularizer = regularizers.l2(l2_coef))(x)
-
-        x = BatchNormalization()(x)
-        x = Activation("relu")(x)
-        x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
-        x = Add()([x,tmp])
-
     x = Dense(units = 2,kernel_regularizer = regularizers.l2(l2_coef), bias_regularizer = regularizers.l2(l2_coef))(x)
-    x = Activation("softmax")(x)
+    main_output = Activation("softmax")(x)
+
+    #x = others
+
 
     model = Model(inputs = inputs,outputs = x)
     opt = keras.optimizers.RMSprop(lr=1e-4, rho = 0.99)

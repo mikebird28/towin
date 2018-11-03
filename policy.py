@@ -6,7 +6,7 @@ from sklearn.preprocessing import LabelEncoder,OneHotEncoder
 import keras
 from keras.models import Model
 from keras.callbacks import EarlyStopping,ModelCheckpoint
-from keras.layers import Dense,Activation,Dropout,Input,Conv2D,Concatenate,SpatialDropout1D,LSTM,Multiply ,Add
+from keras.layers import Dense,Activation,Dropout,Input,Conv2D,Concatenate,SpatialDropout1D,LSTM,Multiply ,Add,Lambda
 from keras.layers.normalization import BatchNormalization
 from keras import regularizers
 from keras import optimizers
@@ -60,7 +60,7 @@ def main():
 
     epoch_size = 100000
     batch_size = 512
-    swap_interval = 1
+    swap_interval = 100
     log_interval = 100
 
     model = nn()
@@ -93,6 +93,7 @@ def main():
 
         if i % log_interval == 0:
             print(i)
+            print(y_df)
             #evaluate(model,train_x,train_y)
             evaluate(model,test_x,test_y)
             print()
@@ -154,18 +155,17 @@ def pretrain(model,train_x,train_rew,test_x,test_rew):
         evaluate(model,train_x,train_rew)
         evaluate(model,test_x,test_rew)
 
-def get_action(model,df,threhold = 0.95,pred = None):
-    #avoid duplicate caculation
-    if pred is None:
-        pred = model.predict(df)
-        pred = np.squeeze(pred)
-    return sample_from_softmax(pred)
-
+def get_action(pred, greedy = 0.95):
+    coef = np.transpose(np.random.choice(2,[1,len(pred)],p = [1-greedy,greedy]))
+    prob = sample_from_softmax(pred)
+    deci = np.eye(2)[pred.argmax(axis = 1)]
+    ret = coef * deci  + (1 - coef) * prob
+    return ret
 
 def sample_from_softmax(array):
     s = array.cumsum(axis=1)
     r = np.random.rand(array.shape[0])
-    k = (s.T < r).sum(axis=0)
+    k = (s.T < r).sum(axis=0).clip(0,1)
     ret = np.zeros_like(array)
     ret[np.arange(array.shape[0]),k] = 1
     return ret
@@ -179,7 +179,7 @@ def calc_time(func):
         return ret
     return wrapper
 
-def get_rewards(model, x, x_dash, y, y_dash,iter_times = 20):
+def get_rewards(model, x, x_dash, y, y_dash,iter_times = 1):
     reward_sum = np.zeros(shape = [2])
     action_reward = np.ones(shape = [2])
     action_reward[1] = y
@@ -188,17 +188,36 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 20):
     pred = np.squeeze(pred)
     reward_matrix = np.ones([len(x_dash),2])
     reward_matrix[:,1] = y_dash
-    #reward_matrix[:,1] = y_dash.values
 
     for i in range(iter_times):
         horse_number = len(x_dash) + 1
-        bin_pred = get_action(model,x_dash,threhold = 0.5,pred = pred)
+        bin_pred = get_action(pred, greedy = 0.9)
         reward = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
         reward = np.where(reward > 0.4, 1 ,0)
         reward_sum += reward
 
     reward_mean = reward_sum/iter_times
     return reward_mean 
+
+def create_reward_model(model,iter_times = 1000):
+    num_actions = 2
+    pred_layer = model.layers[-1].output
+    reward_inputs = Input(shape = (1,),dtype = "float32",name = "reward_inputs")
+
+    def action_layer(layer):
+        batch_size = K.shape(pred_layer)[0]
+        s = K.repeat_elements(K.expand_dims(K.cumsum(pred_layer,axis = 1)),rep = iter_times, axis = 2)
+        r = K.repeat_elements(K.random_uniform(shape=(batch_size,1,iter_times), minval=0.0, maxval=1.0),rep = 2,axis = 1)
+        action_indices = K.clip(K.sum(K.cast(K.less(s,r),"int32"), axis = 1),0,num_actions-1)
+        action_onehot = K.one_hot(action_indices, num_actions)
+        return action_onehot
+
+    def reward_layer(layer):
+        return layer
+
+    actions = Lambda(action_layer)(pred_layer)
+    rewards = Lambda(reward_layer)(actions)
+    return Model(inputs = model.layers[0].input, outputs = rewards)
 
 def softmax(z):
     s = np.max(z)
@@ -208,7 +227,7 @@ def softmax(z):
 
 def evaluate(model,x,y):
     pred = model.predict(x)
-    print(pred[0:20,:])
+    print(pred[0:10,:])
     row_maxes = pred.max(axis=1).reshape(-1, 1)
 
     bin_pred = np.where(pred == row_maxes, 1, 0)
@@ -235,12 +254,17 @@ def nn():
     inputs = Input(shape = (202,),dtype = "float32",name = "input")
     x = inputs
     l2_coef = 2e-4
-    UNIT_SIZE = 512
+    UNIT_SIZE = 1024
 
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
     x = Dropout(0.2)(x)
+    
+    x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
+    x = Activation("relu")(x)
+    x = Dropout(0.2)(x)
 
+    """
     for i in range(2):
         tmp = x
         x = BatchNormalization()(x)
@@ -251,6 +275,7 @@ def nn():
         x = Activation("relu")(x)
         x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
         x = Add()([x,tmp])
+    """
 
     x = Dense(units = 2,kernel_regularizer = regularizers.l2(l2_coef), bias_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("softmax")(x)

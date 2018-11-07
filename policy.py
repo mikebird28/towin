@@ -60,7 +60,7 @@ def main():
 
     epoch_size = 100000
     batch_size = 512
-    swap_interval = 100
+    swap_interval = 1
     log_interval = 100
 
     model = nn()
@@ -179,7 +179,7 @@ def calc_time(func):
         return ret
     return wrapper
 
-def get_rewards(model, x, x_dash, y, y_dash,iter_times = 1):
+def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_sum = np.zeros(shape = [2])
     action_reward = np.ones(shape = [2])
     action_reward[1] = y
@@ -191,12 +191,13 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 1):
 
     for i in range(iter_times):
         horse_number = len(x_dash) + 1
-        bin_pred = get_action(pred, greedy = 0.9)
+        bin_pred = get_action(pred, greedy = 0.05)
         reward = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
         reward = np.where(reward > 0.4, 1 ,0)
         reward_sum += reward
 
     reward_mean = reward_sum/iter_times
+    reward_mean = reward_mean - reward_mean.mean()
     return reward_mean 
 
 def create_reward_model(model,iter_times = 1000):
@@ -252,36 +253,25 @@ def evaluate(model,x,y):
 
 def nn():
     inputs = Input(shape = (202,),dtype = "float32",name = "input")
+    #inputs_others = Input(shape = (
     x = inputs
-    l2_coef = 2e-4
+    l2_coef = 1e-4
     UNIT_SIZE = 1024
 
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
     x = Dropout(0.2)(x)
-    
+
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
     x = Dropout(0.2)(x)
-
-    """
-    for i in range(2):
-        tmp = x
-        x = BatchNormalization()(x)
-        x = Activation("relu")(x)
-        x = Dense(units = UNIT_SIZE//2, kernel_regularizer = regularizers.l2(l2_coef))(x)
-
-        x = BatchNormalization()(x)
-        x = Activation("relu")(x)
-        x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
-        x = Add()([x,tmp])
-    """
+    x = BatchNormalization()(x)
 
     x = Dense(units = 2,kernel_regularizer = regularizers.l2(l2_coef), bias_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("softmax")(x)
 
     model = Model(inputs = inputs,outputs = x)
-    opt = keras.optimizers.RMSprop(lr=1e-4, rho = 0.99)
+    opt = keras.optimizers.RMSprop(lr=5e-5, rho = 0.9)
     model.compile(loss = log_loss, optimizer=opt)
     return model
 

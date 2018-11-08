@@ -16,6 +16,7 @@ from keras import backend as K
 import logging
 import tensorflow as tf
 import random
+from multiprocessing import Pool
 import utils
 
 #PROCESS_FEATUES = ["hi_RaceID","ri_Year","hr_OrderOfFinish"]
@@ -98,6 +99,28 @@ def main():
             evaluate(model,test_x,test_y)
             print()
 
+class Actor():
+    def __init__(self,model_creater):
+        self.pool = Pool(initializer = self._init_process)
+
+    def get_rewards(self,weights,x_ls):
+        pass
+
+    def update_weight(self,wegiths):
+        pass
+
+    def _init_process(self,model_creater):
+        global nn_model
+        nn_model = model_creater()
+
+    def _get_rewards(self,x):
+        global nn_model
+        pass
+
+    def _update_rewards(self,weight):
+        global nn_model
+        nn_model.set_weight(weight)
+
 def fit(model):
     action_prob_placeholder = model.output
     action_onehot_placeholder = K.placeholder(shape=(None, 2), name="action")
@@ -155,17 +178,18 @@ def pretrain(model,train_x,train_rew,test_x,test_rew):
         evaluate(model,train_x,train_rew)
         evaluate(model,test_x,test_rew)
 
-def get_action(pred, greedy = 0.95):
-    coef = np.transpose(np.random.choice(2,[1,len(pred)],p = [1-greedy,greedy]))
+def get_action(pred):
+    #coef = np.transpose(np.random.choice(2,[1,len(pred)],p = [1-greedy,greedy]))
     prob = sample_from_softmax(pred)
-    deci = np.eye(2)[pred.argmax(axis = 1)]
-    ret = coef * deci  + (1 - coef) * prob
-    return ret
+    #deci = np.eye(2)[pred.argmax(axis = 1)]
+    #ret = coef * deci  + (1 - coef) * prob
+    return prob
 
 def sample_from_softmax(array):
     s = array.cumsum(axis=1)
     r = np.random.rand(array.shape[0])
-    k = (s.T < r).sum(axis=0).clip(0,1)
+    k = (s.T < r).sum(axis=0).clip(0.05,0.95)
+    #k = (s.T < r).sum(axis=0).clip(0,1)
     ret = np.zeros_like(array)
     ret[np.arange(array.shape[0]),k] = 1
     return ret
@@ -191,7 +215,7 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
 
     for i in range(iter_times):
         horse_number = len(x_dash) + 1
-        bin_pred = get_action(pred, greedy = 0.05)
+        bin_pred = get_action(pred)
         reward = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
         reward = np.where(reward > 0.4, 1 ,0)
         reward_sum += reward
@@ -199,32 +223,6 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_mean = reward_sum/iter_times
     reward_mean = reward_mean - reward_mean.mean()
     return reward_mean 
-
-def create_reward_model(model,iter_times = 1000):
-    num_actions = 2
-    pred_layer = model.layers[-1].output
-    reward_inputs = Input(shape = (1,),dtype = "float32",name = "reward_inputs")
-
-    def action_layer(layer):
-        batch_size = K.shape(pred_layer)[0]
-        s = K.repeat_elements(K.expand_dims(K.cumsum(pred_layer,axis = 1)),rep = iter_times, axis = 2)
-        r = K.repeat_elements(K.random_uniform(shape=(batch_size,1,iter_times), minval=0.0, maxval=1.0),rep = 2,axis = 1)
-        action_indices = K.clip(K.sum(K.cast(K.less(s,r),"int32"), axis = 1),0,num_actions-1)
-        action_onehot = K.one_hot(action_indices, num_actions)
-        return action_onehot
-
-    def reward_layer(layer):
-        return layer
-
-    actions = Lambda(action_layer)(pred_layer)
-    rewards = Lambda(reward_layer)(actions)
-    return Model(inputs = model.layers[0].input, outputs = rewards)
-
-def softmax(z):
-    s = np.max(z)
-    e_x = np.exp(z - s)
-    div = np.sum(e_x)
-    return e_x / div
 
 def evaluate(model,x,y):
     pred = model.predict(x)
@@ -253,10 +251,10 @@ def evaluate(model,x,y):
 
 def nn():
     inputs = Input(shape = (202,),dtype = "float32",name = "input")
-    #inputs_others = Input(shape = (
     x = inputs
     l2_coef = 1e-4
-    UNIT_SIZE = 1024
+    learning_rate = 1e-3
+    UNIT_SIZE = 756
 
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
@@ -265,13 +263,30 @@ def nn():
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
     x = Dropout(0.2)(x)
+
+    x = BatchNormalization()(x)
+
+    """
+    for i in range(1):
+        tmp = x
+        x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization()(x)
+
+        x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.2)(x)
+        x = Add()([x,tmp])
+        x = Activation("relu")(x)
+    """
+
     x = BatchNormalization()(x)
 
     x = Dense(units = 2,kernel_regularizer = regularizers.l2(l2_coef), bias_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("softmax")(x)
 
     model = Model(inputs = inputs,outputs = x)
-    opt = keras.optimizers.RMSprop(lr=5e-5, rho = 0.9)
+    opt = keras.optimizers.RMSprop(lr=learning_rate, rho = 0.9)
     model.compile(loss = log_loss, optimizer=opt)
     return model
 

@@ -138,9 +138,30 @@ def fit(model):
     return train_fn
 
 def to_trainable(df):
-    drop_targets = [c for c in df.columns if c in PROCESS_FEATURE]
-    return df.drop(drop_targets,axis = 1)
-    #x = df.loc[:,["li_WinOdds","pred"]]
+    #df_dict = {}
+    #categoricals = [c for c in df.columns if c in categoricals]
+    #for c in categoricals:
+    #    df_dict[c] = df.loc[:,c]
+
+    numericals = [c for c in df.columns if c not in PROCESS_FEATURE]
+    return df.loc[:,numericals]
+
+class Dataset(object):
+
+    def __init__(self,x,y,categoricals = []):
+        self.y = y
+        #convert x to dictionary
+        self.x_dict = {}
+        categoricals = [c for c in x.columns if c in categoricals]
+        for c in categoricals:
+            self.x_dict[c] = x.loc[:,c]
+
+        numericals = [c for c in x.columns if c not in categoricals + PROCESS_FEATURE]
+        self.x_dict["main"] = x.loc[:,numericals]
+
+        del(x,y)
+        gc.collect()
+
 
 class BatchGenerator(object):
     def __init__(self,df,target_varibale):
@@ -178,31 +199,6 @@ def pretrain(model,train_x,train_rew,test_x,test_rew):
         evaluate(model,train_x,train_rew)
         evaluate(model,test_x,test_rew)
 
-def get_action(pred):
-    #coef = np.transpose(np.random.choice(2,[1,len(pred)],p = [1-greedy,greedy]))
-    prob = sample_from_softmax(pred)
-    #deci = np.eye(2)[pred.argmax(axis = 1)]
-    #ret = coef * deci  + (1 - coef) * prob
-    return prob
-
-def sample_from_softmax(array):
-    s = array.cumsum(axis=1)
-    r = np.random.rand(array.shape[0])
-    k = (s.T < r).sum(axis=0).clip(0.05,0.95)
-    #k = (s.T < r).sum(axis=0).clip(0,1)
-    ret = np.zeros_like(array)
-    ret[np.arange(array.shape[0]),k] = 1
-    return ret
-
-def calc_time(func):
-    def wrapper(*args,**kwargs):
-        start = time.time()
-        ret = func(*args,**kwargs)
-        end = time.time()
-        print("elapsed time - {}".format(start - end))
-        return ret
-    return wrapper
-
 def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_sum = np.zeros(shape = [2])
     action_reward = np.ones(shape = [2])
@@ -213,9 +209,18 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_matrix = np.ones([len(x_dash),2])
     reward_matrix[:,1] = y_dash
 
+    visited = np.ones_like(pred)
+    horse_number = len(x_dash) + 1
+
     for i in range(iter_times):
-        horse_number = len(x_dash) + 1
-        bin_pred = get_action(pred)
+        puct_coef = np.sqrt(visited.sum(axis = 1,keepdims = True) - visited) / (0.01 + visited)
+        bin_pred = get_action_by_puct(puct_coef * pred)
+
+        #pred_r = puct_coef * pred
+        #pred_r = pred / pred.sum(axis = 1,keep_dims = True)
+        #bin_pred = get_action_by_prob(pred_r)
+        visited += bin_pred
+
         reward = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
         reward = np.where(reward > 0.4, 1 ,0)
         reward_sum += reward
@@ -223,6 +228,18 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_mean = reward_sum/iter_times
     reward_mean = reward_mean - reward_mean.mean()
     return reward_mean 
+
+def get_action_by_prob(pred):
+    #rescale to consitent sum to 1
+    s = pred.cumsum(axis=1)
+    r = np.random.rand(pred.shape[0])
+    k = (s.T < r).sum(axis=0).clip(0,1)
+    ret = np.zeros_like(pred)
+    ret[np.arange(pred.shape[0]),k] = 1
+    return ret
+
+def get_action_by_puct(pred):
+    return np.eye(2)[pred.argmax(axis = 1)]
 
 def evaluate(model,x,y):
     pred = model.predict(x)
@@ -249,12 +266,13 @@ def evaluate(model,x,y):
     txt = "buy {}/{}, hit : {:.3f}, ret : {:.3f}".format(buy_total,race_total,hit_ratio,ret_ratio)
     print(txt)
 
+# NN functions
 def nn():
     inputs = Input(shape = (202,),dtype = "float32",name = "input")
     x = inputs
     l2_coef = 1e-4
     learning_rate = 1e-3
-    UNIT_SIZE = 756
+    UNIT_SIZE = 1024
 
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
@@ -289,6 +307,16 @@ def nn():
     opt = keras.optimizers.RMSprop(lr=learning_rate, rho = 0.9)
     model.compile(loss = log_loss, optimizer=opt)
     return model
+
+def huber_loss(y_true, y_pred):
+    return tf.losses.huber_loss(y_true,y_pred)
+
+def log_loss(y_true, y_pred):
+    y_pred = tf.clip_by_value(y_pred,1e-8,1)
+    return -tf.reduce_mean(tf.multiply(y_true,tf.log(y_pred)))
+
+
+#preprocess functions
 
 class fillna(preprep.Operator):
     def __init__(self):
@@ -505,19 +533,23 @@ def optimize_type(df,categoricals):
             typ = np.int16
         df[c] = df[c].astype(typ)
     return df
-
-def huber_loss(y_true, y_pred):
-    return tf.losses.huber_loss(y_true,y_pred)
-
-def log_loss(y_true, y_pred):
-    y_pred = tf.clip_by_value(y_pred,1e-8,1)
-    return -tf.reduce_mean(tf.multiply(y_true,tf.log(y_pred)))
-
 def remove_irregal(df,target = "hr_PaybackWin"):
     group_sum = df.loc[:,["hi_RaceID",target]].groupby("hi_RaceID")[target].sum().reset_index()
     irregals = group_sum.loc[group_sum.loc[:,target] == 0,"hi_RaceID"].values
     df = df.loc[~df.loc[:,"hi_RaceID"].isin(irregals),:]
     return df
+
+#utilities
+def calc_time(func):
+    #decorator to evaluate elapsed time
+    def wrapper(*args,**kwargs):
+        start = time.time()
+        ret = func(*args,**kwargs)
+        end = time.time()
+        print("elapsed time - {}".format(start - end))
+        return ret
+    return wrapper
+
 
 if __name__ == "__main__":
     main()

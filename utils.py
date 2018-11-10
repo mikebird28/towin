@@ -5,6 +5,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import  OneHotEncoder
 import pandas as pd
 import numpy as np
+import time
 
 def process_features():
     PROCESS_FEATURE = [
@@ -183,5 +184,15 @@ def remove_illegal_races(df):
     df = df[~df["hi_RaceID"].isin(illegals)]
     return df
             
+def calc_time(func):
+    #decorator to evaluate elapsed time
+    def wrapper(*args,**kwargs):
+        start = time.time()
+        ret = func(*args,**kwargs)
+        end = time.time()
+        print("elapsed time - {}".format(start - end))
+        return ret
+    return wrapper
+
 
 

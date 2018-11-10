@@ -1,7 +1,4 @@
 
-TAG="lgb-container"
-HOST_REGION="asia.gcr.io"
-PROJECT_ID="ml-env-217713"
-IMAGE_NAME="lgb_container"
 
-gcloud container images delete $HOST_REGION/$PROJECT_ID/$IMAGE_NAME --force-delete-tags
+REPOGITRY_NAME=$CLOUDML_HOST_REGION/$CLOUDML_PROJECT_ID/$CLOUDML_IMAGE_NAME
+gcloud container images delete $REPOGITRY_NAME --force-delete-tags

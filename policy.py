@@ -10,7 +10,6 @@ from keras.layers import Dense,Activation,Dropout,Input,Conv2D,Concatenate,Spati
 from keras.layers.normalization import BatchNormalization
 from keras import regularizers
 from keras import optimizers
-import time
 import gc
 from keras import backend as K
 import logging
@@ -19,7 +18,6 @@ import random
 from multiprocessing import Pool
 import utils
 
-#PROCESS_FEATUES = ["hi_RaceID","ri_Year","hr_OrderOfFinish"]
 PROCESS_FEATURE = utils.process_features() + ["hr_PaybackPlace_eval","hr_PaybackWin_eval"]
 PROCESS_FEATURE = ["hi_Distance","ri_Year"] + PROCESS_FEATURE
 PROCESS_FEATURE.remove("li_WinOdds")
@@ -31,7 +29,7 @@ def main():
 
     columns_dict = utils.load_dtypes(DTYPE_PATH)
     columns = sorted(columns_dict.keys())
-    removes = utils.load_removes("remove.csv")
+    removes = utils.load_removes("./configs/remove.csv")
     categoricals,numericals = utils.cats_and_nums(columns,columns_dict)
     df = pd.read_csv("./data/output.csv",dtype = columns_dict,usecols = columns)
     df = df[df["ri_Year"] >= 2007]
@@ -63,8 +61,10 @@ def main():
     batch_size = 512
     swap_interval = 1
     log_interval = 100
+    lr_update_interval = 100000
+    avg_loss = 0
 
-    model = nn()
+    model,opt = nn()
 
     tmp_model = keras.models.clone_model(model)
 
@@ -74,12 +74,10 @@ def main():
 
     for i in range(1,epoch_size+1):
         race_x,race_y = bg.get_batch(batch_size)
-
         for j in range(batch_size):
             x = race_x[j].values
             y = race_y[j].values
-            target_idx = np.random.randint(0,len(x))
-
+            target_idx = np.random.randint(0,len(x)) 
             target_row = x[target_idx]
             x_df[j,:] = target_row
             x_dash = np.delete(x,target_idx,0)
@@ -87,16 +85,24 @@ def main():
             y2 = np.delete(y,target_idx,0)
             y_df[j,:] = get_rewards(tmp_model,target_row,x_dash,y1,y2)
 
-        model.fit(x_df,y_df,verbose = 0, epochs = 1,batch_size = batch_size)
+        history = model.fit(x_df,y_df,verbose = 0, epochs = 1,batch_size = batch_size)
+        avg_loss += history.history["loss"][0]
 
         if i % swap_interval == 0:
             tmp_model.set_weights(model.get_weights())
 
+        if i % lr_update_interval == 0:
+            current_lr = K.get_value(opt.lr)
+            K.set_value(opt.lr,current_lr/2)
+
         if i % log_interval == 0:
+            avg_loss = avg_loss/log_interval
             print(i)
+            print("averate trian loss : {}".format(avg_loss))
             print(y_df)
             #evaluate(model,train_x,train_y)
             evaluate(model,test_x,test_y)
+            avg_loss = 0
             print()
 
 class Actor():
@@ -138,30 +144,36 @@ def fit(model):
     return train_fn
 
 def to_trainable(df):
-    #df_dict = {}
-    #categoricals = [c for c in df.columns if c in categoricals]
-    #for c in categoricals:
-    #    df_dict[c] = df.loc[:,c]
-
     numericals = [c for c in df.columns if c not in PROCESS_FEATURE]
     return df.loc[:,numericals]
 
 class Dataset(object):
 
     def __init__(self,x,y,categoricals = []):
-        self.y = y
+        x,y = self.to_trainable(x,y,categoricals)
+        self.x_df = []
+        self.y_df = []
+
+        for idx,race in df.groupby("hi_RaceID"):
+            x = to_trainable(race)
+            y = race.loc[:,target_varibale]
+            self.x_df.append(x)
+            self.y_df.append(y)
+
+
+    def _to_trainable(self,x,y,categoricals):
         #convert x to dictionary
-        self.x_dict = {}
+        x_dict = {}
         categoricals = [c for c in x.columns if c in categoricals]
         for c in categoricals:
-            self.x_dict[c] = x.loc[:,c]
+            x_dict[c] = x.loc[:,c]
 
         numericals = [c for c in x.columns if c not in categoricals + PROCESS_FEATURE]
-        self.x_dict["main"] = x.loc[:,numericals]
+        x_dict["main"] = x.loc[:,numericals]
 
-        del(x,y)
+        del(x)
         gc.collect()
-
+        return x_dict,y
 
 class BatchGenerator(object):
     def __init__(self,df,target_varibale):
@@ -199,7 +211,7 @@ def pretrain(model,train_x,train_rew,test_x,test_rew):
         evaluate(model,train_x,train_rew)
         evaluate(model,test_x,test_rew)
 
-def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
+def get_rewards(model, x, x_dash, y, y_dash,iter_times = 50):
     reward_sum = np.zeros(shape = [2])
     action_reward = np.ones(shape = [2])
     action_reward[1] = y
@@ -270,43 +282,30 @@ def evaluate(model,x,y):
 def nn():
     inputs = Input(shape = (202,),dtype = "float32",name = "input")
     x = inputs
-    l2_coef = 1e-4
-    learning_rate = 1e-3
+
+    #Constants
+    LEARNING_RATE = 1e-4
+    L2_COEF = 1e-4
     UNIT_SIZE = 1024
+    DROPOUT_RATE = 0.5
 
-    x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
+    x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(L2_COEF))(x)
     x = Activation("relu")(x)
-    x = Dropout(0.2)(x)
+    x = Dropout(DROPOUT_RATE)(x)
 
-    x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
+    x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(L2_COEF))(x)
     x = Activation("relu")(x)
-    x = Dropout(0.2)(x)
-
+    x = Dropout(DROPOUT_RATE)(x)
     x = BatchNormalization()(x)
 
-    """
-    for i in range(1):
-        tmp = x
-        x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
-        x = Activation("relu")(x)
-        x = BatchNormalization()(x)
-
-        x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(l2_coef))(x)
-        x = BatchNormalization()(x)
-        x = Dropout(0.2)(x)
-        x = Add()([x,tmp])
-        x = Activation("relu")(x)
-    """
-
-    x = BatchNormalization()(x)
-
-    x = Dense(units = 2,kernel_regularizer = regularizers.l2(l2_coef), bias_regularizer = regularizers.l2(l2_coef))(x)
+    x = Dense(units = 2,kernel_regularizer = regularizers.l2(L2_COEF), bias_regularizer = regularizers.l2(L2_COEF))(x)
     x = Activation("softmax")(x)
 
     model = Model(inputs = inputs,outputs = x)
-    opt = keras.optimizers.RMSprop(lr=learning_rate, rho = 0.9)
+    #opt = keras.optimizers.SGD(lr=learning_rate, momentum = 0.9)
+    opt = keras.optimizers.RMSprop(lr=LEARNING_RATE, rho = 0.9)
     model.compile(loss = log_loss, optimizer=opt)
-    return model
+    return model,opt
 
 def huber_loss(y_true, y_pred):
     return tf.losses.huber_loss(y_true,y_pred)
@@ -315,9 +314,7 @@ def log_loss(y_true, y_pred):
     y_pred = tf.clip_by_value(y_pred,1e-8,1)
     return -tf.reduce_mean(tf.multiply(y_true,tf.log(y_pred)))
 
-
 #preprocess functions
-
 class fillna(preprep.Operator):
     def __init__(self):
         super().__init__()
@@ -538,18 +535,6 @@ def remove_irregal(df,target = "hr_PaybackWin"):
     irregals = group_sum.loc[group_sum.loc[:,target] == 0,"hi_RaceID"].values
     df = df.loc[~df.loc[:,"hi_RaceID"].isin(irregals),:]
     return df
-
-#utilities
-def calc_time(func):
-    #decorator to evaluate elapsed time
-    def wrapper(*args,**kwargs):
-        start = time.time()
-        ret = func(*args,**kwargs)
-        end = time.time()
-        print("elapsed time - {}".format(start - end))
-        return ret
-    return wrapper
-
 
 if __name__ == "__main__":
     main()

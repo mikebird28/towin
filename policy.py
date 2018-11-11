@@ -2,11 +2,10 @@ import preprep
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from sklearn.preprocessing import LabelEncoder,OneHotEncoder
+from sklearn.preprocessing import LabelEncoder
 import keras
 from keras.models import Model
-from keras.callbacks import EarlyStopping,ModelCheckpoint
-from keras.layers import Dense,Activation,Dropout,Input,Conv2D,Concatenate,SpatialDropout1D,LSTM,Multiply ,Add,Lambda
+from keras.layers import Dense, Activation, Dropout, Input, Embedding ,Concatenate, Flatten, SpatialDropout1D
 from keras.layers.normalization import BatchNormalization
 from keras import regularizers
 from keras import optimizers
@@ -15,8 +14,8 @@ from keras import backend as K
 import logging
 import tensorflow as tf
 import random
-from multiprocessing import Pool
 import utils
+import time
 
 PROCESS_FEATURE = utils.process_features() + ["hr_PaybackPlace_eval","hr_PaybackWin_eval"]
 PROCESS_FEATURE = ["hi_Distance","ri_Year"] + PROCESS_FEATURE
@@ -39,53 +38,64 @@ def main():
     p = p.add(label_encoding,params = {"categoricals" : categoricals},name = "lenc", cache_format = "feather")
     p = p.add(normalize(), params = {"categoricals" : categoricals}, name = "norm", cache_format = "feather")
     p = p.add(drop_columns, params = {"remove" : removes}, name = "drop", cache_format = "feather")
-    p = p.add(onehot_encoding,params = {"categoricals" : categoricals}, name = "ohe",cache_format = "feather")
+    #p = p.add(onehot_encoding,params = {"categoricals" : categoricals}, name = "ohe",cache_format = "feather")
     df = p.fit_gene(df,verbose = True)
     df,test_df = split_with_year(df,year = 2017)
-    
-    target_variable = "hr_PaybackPlace"
-    eval_variable = target_variable + "_eval"
-    df = remove_irregal(df,target = target_variable)
+    del(p)
+    gc.collect()
 
-    #prepare datasets
-    #train_x = to_trainable(df)
-    #train_y = df.loc[:,eval_variable]
-    test_x = to_trainable(test_df)
-    test_y = test_df.loc[:,eval_variable]
-    bg = BatchGenerator(df,target_variable)
-    del(p,df,test_df);gc.collect()
+    policy_gradient(df,test_df,categoricals = categoricals)
 
-    feature_size = test_x.shape[0]
 
+def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackPlace"):
     epoch_size = 100000
     batch_size = 512
     swap_interval = 1
-    log_interval = 100
+    log_interval = 50
     lr_update_interval = 100000
     avg_loss = 0
+    eval_variable = target_variable + "_eval"
 
-    model,opt = nn()
 
+    #feature informations
+    all_features = [c for c in df.columns if c not in PROCESS_FEATURE]
+    categoricals = [c for c in all_features if c in categoricals]
+    numericals = [c for c in all_features if c not in categoricals]
+    cats_max_values = categorical_max_values([df,test_df],categoricals)
+
+    #prepare datasets
+    df = remove_irregal(df,target = target_variable)
+    test_df = remove_irregal(test_df,target = target_variable)
+
+    bg = BatchGenerator(df,target_variable,categoricals)
+    test_batch = Batch(df,target_variable,categoricals)
+    test_x,test_y = test_batch.get_all()
+    del(df,test_df,test_batch);gc.collect()
+
+    #create model
+    model,opt = nn(len(numericals),cats_max_values)
     tmp_model = keras.models.clone_model(model)
 
-    feature_size = 202
-    x_df = np.zeros(shape = [batch_size,feature_size])
-    y_df = np.zeros(shape = [batch_size,2])
+    x_holder = DataHolderX(batch_size,categoricals,numericals)
+    y_holder = DataHolderY(batch_size,2)
 
     for i in range(1,epoch_size+1):
-        race_x,race_y = bg.get_batch(batch_size)
+        races = bg.get_batch(batch_size)
+        choose_avg = 0
+        reward_avg = 0
         for j in range(batch_size):
-            x = race_x[j].values
-            y = race_y[j].values
-            target_idx = np.random.randint(0,len(x)) 
-            target_row = x[target_idx]
-            x_df[j,:] = target_row
-            x_dash = np.delete(x,target_idx,0)
-            y1 = y[target_idx]
-            y2 = np.delete(y,target_idx,0)
-            y_df[j,:] = get_rewards(tmp_model,target_row,x_dash,y1,y2)
-
-        history = model.fit(x_df,y_df,verbose = 0, epochs = 1,batch_size = batch_size)
+            choose_start = time.time()
+            x1,x2,y1,y2 = races[j].choose_one_others()
+            print(y1)
+            print(y2)
+            x_holder.update(j, x1)
+            choose_avg += time.time() - choose_start
+            reward_start = time.time()
+            y_holder.update(j, get_rewards(tmp_model,x1,x2,y1,y2))
+            reward_avg += time.time() - reward_start
+        print("choose : {}".format(choose_avg))
+        print("reward : {}".format(reward_avg))
+        history = model.fit(x_holder.get_dataset(), y_holder.get_dataset(), verbose = 0, epochs = 1,batch_size = batch_size)
         avg_loss += history.history["loss"][0]
 
         if i % swap_interval == 0:
@@ -99,142 +109,140 @@ def main():
             avg_loss = avg_loss/log_interval
             print(i)
             print("averate trian loss : {}".format(avg_loss))
-            print(y_df)
+            print(y_holder.get_dataset())
             #evaluate(model,train_x,train_y)
             evaluate(model,test_x,test_y)
             avg_loss = 0
             print()
 
-class Actor():
-    def __init__(self,model_creater):
-        self.pool = Pool(initializer = self._init_process)
+class Batch(object):
+    def __init__(self,df,target_variable,categoricals):
+        all_features = [c for c in df.columns if c not in PROCESS_FEATURE]
+        categoricals = sorted([c for c in all_features if c in categoricals])
+        numericals = sorted([c for c in all_features if c not in categoricals])
+        self.separate_idx = len(numericals)
+        df = relocate_df(df,categoricals,numericals)
+        self.x = remove_process_features(df)
+        self.y = df.loc[:,target_variable]
 
-    def get_rewards(self,weights,x_ls):
-        pass
+    def get_all(self):
+        x = convert_to_trainable(self.x,self.separate_idx, self.categoricals)
+        return x,self.y
 
-    def update_weight(self,wegiths):
-        pass
+class BatchGenerator(object):
+    def __init__(self,df,target_varibale,categoricals):
+        all_features = [c for c in df.columns if c not in PROCESS_FEATURE]
+        categoricals = sorted([c for c in all_features if c in categoricals])
+        numericals = sorted([c for c in all_features if c not in categoricals])
+        separate_idx = len(numericals)
+        df = relocate_df(df,categoricals,numericals)
 
-    def _init_process(self,model_creater):
-        global nn_model
-        nn_model = model_creater()
+        self.races = []
+        for idx,race in df.groupby("hi_RaceID"):
+            x = remove_process_features(race)
+            y = race.loc[:,target_varibale]
+            race = Race(x,y,separate_idx,categoricals)
+            self.races.append(race)
 
-    def _get_rewards(self,x):
-        global nn_model
-        pass
+    def get_batch(self,batch_size):
+        total_races = len(self.races)
+        target_idx = random.sample(range(total_races),batch_size)
+        races = [self.races[i] for i in target_idx]
+        return races
 
-    def _update_rewards(self,weight):
-        global nn_model
-        nn_model.set_weight(weight)
+class Race(object):
+    def __init__(self,x,y,separate_idx,categoricals):
+        self.x = x.values
+        self.y = y.values
+        self.separate_idx = separate_idx
+        self.categoricals = categoricals
 
-def fit(model):
-    action_prob_placeholder = model.output
-    action_onehot_placeholder = K.placeholder(shape=(None, 2), name="action")
+    def choose_one_others(self):
+        target_idx = np.random.randint(0,len(self.x)) 
+        idx = np.zeros(len(self.x), dtype = bool)
+        idx[target_idx] = True
 
-    discount_reward_placeholder = K.placeholder(shape=(None,),name="reward")
-    action_prob = K.sum(action_prob_placeholder * action_onehot_placeholder, axis=1)
+        x1 = convert_to_trainable(self.x[idx],self.separate_idx, self.categoricals)
+        x2 = convert_to_trainable(self.x[~idx],self.separate_idx, self.categoricals)
+        y1 = self.y[idx]
+        y2 = self.y[~idx]
+        return x1,x2,y1,y2
 
-    log_action_prob = K.log(action_prob)
-    loss = - log_action_prob * discount_reward_placeholder
-    loss = K.mean(loss)
+class DataHolderX(object):
+    def __init__(self,batch_size,categoricals,numericals):
+        self.dic = {}
+        self.categoricals = categoricals 
+        self.numericals = numericals
+        for c in categoricals:
+            self.dic[c] = np.zeros([batch_size,1])
+        self.dic["main"] = np.zeros([batch_size,len(numericals)])
 
-    adam = optimizers.Adam()
-    updates = adam.get_updates(params=model.trainable_weights,loss=loss)
-    train_fn = K.function(inputs=[model.input,action_onehot_placeholder,discount_reward_placeholder],outputs=[],updates=updates)
-    return train_fn
+    def update(self,i,data_dict):
+        self.dic["main"][i,:] = data_dict["main"]
+        for c in self.categoricals:
+            self.dic[c][i] = data_dict[c]
 
-def to_trainable(df):
+    def get_dataset(self):
+        return self.dic
+
+class DataHolderY(object):
+    def __init__(self,batch_size,action_size):
+        self.holder = np.zeros([batch_size,action_size])
+
+    def update(self,i,value):
+        self.holder[i] = value
+
+    def get_dataset(self):
+        return self.holder
+
+def relocate_df(df,cats,nums):
+    num_df = df.loc[:,nums]
+    cat_df = df.loc[:,cats]
+    others = df.loc[:,~df.columns.isin(cats + nums)]
+    df = pd.concat([num_df,cat_df,others],axis = 1)
+    return df
+
+def remove_process_features(df):
     numericals = [c for c in df.columns if c not in PROCESS_FEATURE]
     return df.loc[:,numericals]
 
-class Dataset(object):
+def convert_to_trainable(x,separate_idx,categoricals):
+    x_dict = {}
+    x_dict["main"] = x[:,0:separate_idx]
+    for i in range(separate_idx,x.shape[1]):
+        col = categoricals[i - separate_idx]
+        x_dict[col] = x[:,i]
+    return x_dict
 
-    def __init__(self,x,y,categoricals = []):
-        x,y = self.to_trainable(x,y,categoricals)
-        self.x_df = []
-        self.y_df = []
-
-        for idx,race in df.groupby("hi_RaceID"):
-            x = to_trainable(race)
-            y = race.loc[:,target_varibale]
-            self.x_df.append(x)
-            self.y_df.append(y)
-
-
-    def _to_trainable(self,x,y,categoricals):
-        #convert x to dictionary
-        x_dict = {}
-        categoricals = [c for c in x.columns if c in categoricals]
-        for c in categoricals:
-            x_dict[c] = x.loc[:,c]
-
-        numericals = [c for c in x.columns if c not in categoricals + PROCESS_FEATURE]
-        x_dict["main"] = x.loc[:,numericals]
-
-        del(x)
-        gc.collect()
-        return x_dict,y
-
-class BatchGenerator(object):
-    def __init__(self,df,target_varibale):
-        self.x_df = []
-        self.y_df = []
-
-        for idx,race in df.groupby("hi_RaceID"):
-            x = to_trainable(race)
-            y = race.loc[:,target_varibale]
-            self.x_df.append(x)
-            self.y_df.append(y)
-
-    def get_batch(self,batch_size):
-        total_races = len(self.x_df)
-        target_idx = random.sample(range(total_races),batch_size)
-        x = [self.x_df[i] for i in target_idx]
-        y = [self.y_df[i] for i in target_idx]
-        return x,y
-
-def pretrain(model,train_x,train_rew,test_x,test_rew):
-    train_payoff = np.zeros(shape = [len(train_rew),2])
-    train_payoff[:,1] = train_rew.values
-    train_payoff[:,0] = (train_payoff[:,1] == 0).astype(int)
-    #train_y = train_payoff
-    train_y = train_payoff.clip(0,1)
-
-    test_payoff = np.zeros(shape = [len(test_rew),2])
-    test_payoff[:,1] = test_rew.values
-    test_payoff[:,0] = (test_payoff[:,1] == 0).astype(int)
-    #test_y = test_payoff.clip(0,1)
-
-    epochs = 3
-    for i in range(epochs):
-        model.fit(train_x,train_y,verbose = 1, epochs = 1,batch_size = 128)
-        evaluate(model,train_x,train_rew)
-        evaluate(model,test_x,test_rew)
-
-def get_rewards(model, x, x_dash, y, y_dash,iter_times = 50):
+def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_sum = np.zeros(shape = [2])
     action_reward = np.ones(shape = [2])
     action_reward[1] = y
 
     pred = model.predict(x_dash)
     pred = np.squeeze(pred)
-    reward_matrix = np.ones([len(x_dash),2])
+
+    horse_num = len(x_dash["main"])
+    reward_matrix = np.ones([horse_num,2])
     reward_matrix[:,1] = y_dash
 
-    visited = np.ones_like(pred)
     horse_number = len(x_dash) + 1
+    visited = np.ones_like(pred)
+    puct_coef = np.zeros(shape = [horse_num,2])
+    bin_pred = np.zeros(shape = [horse_num,2])
+    reward = np.zeros(shape = [2])
 
     for i in range(iter_times):
-        puct_coef = np.sqrt(visited.sum(axis = 1,keepdims = True) - visited) / (0.01 + visited)
-        bin_pred = get_action_by_puct(puct_coef * pred)
+        puct_coef[:] = np.sqrt(visited.sum(axis = 1,keepdims = True) - visited) / (0.01 + visited)
+        bin_pred[:] = get_action_by_puct(puct_coef * pred)
 
         #pred_r = puct_coef * pred
         #pred_r = pred / pred.sum(axis = 1,keep_dims = True)
         #bin_pred = get_action_by_prob(pred_r)
         visited += bin_pred
 
-        reward = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
-        reward = np.where(reward > 0.4, 1 ,0)
+        reward[:] = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
+        reward[:] = np.where(reward > 0.4, 1 ,0)
         reward_sum += reward
 
     reward_mean = reward_sum/iter_times
@@ -278,16 +286,48 @@ def evaluate(model,x,y):
     txt = "buy {}/{}, hit : {:.3f}, ret : {:.3f}".format(buy_total,race_total,hit_ratio,ret_ratio)
     print(txt)
 
+def categorical_max_values(df_ls,categoricals):
+    ret_dic = {}
+    for df in df_ls:
+        for c in df.columns:
+            if c not in categoricals:
+                continue
+            max_value = df.loc[:,c].max()
+            #ret_dic already had value and largaer than max_value, skip
+            if c in ret_dic and ret_dic[c] > max_value:
+                continue
+            ret_dic[c] = max_value
+    return ret_dic
+
 # NN functions
-def nn():
-    inputs = Input(shape = (202,),dtype = "float32",name = "input")
-    x = inputs
+def nn(numerical_features, max_values):
 
     #Constants
     LEARNING_RATE = 1e-4
     L2_COEF = 1e-4
     UNIT_SIZE = 1024
-    DROPOUT_RATE = 0.5
+    DROPOUT_RATE = 0.4
+
+    inputs = []
+    flatten_layers = []
+
+    #input unit
+    #numericals:
+    x = Input(shape = (numerical_features,) ,dtype = "float32", name = "main")
+    inputs.append(x)
+    flatten_layers.append(x)
+
+    #categoricals
+    for c in max_values:
+        inp_dim = max_values[c] + 1
+        out_dim = embedding_size(inp_dim)
+        x = Input(shape = (1,),dtype = "float32",name = c)
+        inputs.append(x)
+        x = Embedding(inp_dim,out_dim,input_length = 1, embeddings_regularizer = keras.regularizers.l2(0.01))(x)
+        x = SpatialDropout1D(0.3)(x)
+        x = Flatten()(x)
+        flatten_layers.append(x)
+    x = Concatenate()(flatten_layers)
 
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(L2_COEF))(x)
     x = Activation("relu")(x)
@@ -296,23 +336,29 @@ def nn():
     x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(L2_COEF))(x)
     x = Activation("relu")(x)
     x = Dropout(DROPOUT_RATE)(x)
+
     x = BatchNormalization()(x)
-
     x = Dense(units = 2,kernel_regularizer = regularizers.l2(L2_COEF), bias_regularizer = regularizers.l2(L2_COEF))(x)
     x = Activation("softmax")(x)
 
     model = Model(inputs = inputs,outputs = x)
-    #opt = keras.optimizers.SGD(lr=learning_rate, momentum = 0.9)
     opt = keras.optimizers.RMSprop(lr=LEARNING_RATE, rho = 0.9)
     model.compile(loss = log_loss, optimizer=opt)
     return model,opt
 
-def huber_loss(y_true, y_pred):
-    return tf.losses.huber_loss(y_true,y_pred)
-
 def log_loss(y_true, y_pred):
     y_pred = tf.clip_by_value(y_pred,1e-8,1)
     return -tf.reduce_mean(tf.multiply(y_true,tf.log(y_pred)))
+
+def embedding_size(size):
+    if size < 10:
+        return size // 3 + 1
+    elif size < 30:
+        return size // 5 + 1
+    elif size < 150:
+        return size // 10 + 1
+    else:
+        return size // 20 + 1
 
 #preprocess functions
 class fillna(preprep.Operator):
@@ -382,30 +428,6 @@ def label_encoding(df,categoricals = [],logger = None):
 
     df = optimize_type(df,categoricals)
     return df
-
-def onehot_encoding(df,categoricals = [],logger = None):
-    logger = logger or logging.getLogger(__name__)
-    logger.debug("onehot_encoding : function called")
-
-    remove_columns = ["ri_Datetime"] + PROCESS_FEATURE
-    categoricals = [c for c in categoricals if c in df.columns]
-    categoricals = [c for c in categoricals if c not in PROCESS_FEATURE]
-    return df.drop(categoricals,axis = 1)
-
-    for c in categoricals:
-        if (c not in df.columns) or (c in remove_columns):
-            continue
-        logger.debug("onehot_encoding : start encoding {}".format(c))
-        ohe = OneHotEncoder(sparse = False)
-        transformed = pd.DataFrame(ohe.fit_transform(df.loc[:,[c]]))
-        transformed.columns = ["{}_{}".format(c,i+1) for i in range(len(transformed.columns))]
-        transformed_dims = transformed.shape[1]
-        df = pd.concat([df,transformed],axis = 1)
-        df.drop(c,axis = 1,inplace = True)
-        df.loc[:,transformed.columns] = df.loc[:,transformed.columns].astype(np.int8)
-        logger.debug("onehot_encoding : finish encoding {}, dim size = {}".format(c,transformed_dims))
-    return df
-
 
 def drop_columns(df,remove = None, target = None,logger = None):
     logger = logger or logging.getLogger(__name__)
@@ -530,11 +552,48 @@ def optimize_type(df,categoricals):
             typ = np.int16
         df[c] = df[c].astype(typ)
     return df
+
 def remove_irregal(df,target = "hr_PaybackWin"):
     group_sum = df.loc[:,["hi_RaceID",target]].groupby("hi_RaceID")[target].sum().reset_index()
     irregals = group_sum.loc[group_sum.loc[:,target] == 0,"hi_RaceID"].values
     df = df.loc[~df.loc[:,"hi_RaceID"].isin(irregals),:]
     return df
+
+def pretrain(model,train_x,train_rew,test_x,test_rew):
+    train_payoff = np.zeros(shape = [len(train_rew),2])
+    train_payoff[:,1] = train_rew.values
+    train_payoff[:,0] = (train_payoff[:,1] == 0).astype(int)
+    #train_y = train_payoff
+    train_y = train_payoff.clip(0,1)
+
+    test_payoff = np.zeros(shape = [len(test_rew),2])
+    test_payoff[:,1] = test_rew.values
+    test_payoff[:,0] = (test_payoff[:,1] == 0).astype(int)
+    #test_y = test_payoff.clip(0,1)
+
+    epochs = 3
+    for i in range(epochs):
+        model.fit(train_x,train_y,verbose = 1, epochs = 1,batch_size = 128)
+        evaluate(model,train_x,train_rew)
+        evaluate(model,test_x,test_rew)
+
+def fit(model):
+    action_prob_placeholder = model.output
+    action_onehot_placeholder = K.placeholder(shape=(None, 2), name="action")
+
+    discount_reward_placeholder = K.placeholder(shape=(None,),name="reward")
+    action_prob = K.sum(action_prob_placeholder * action_onehot_placeholder, axis=1)
+
+    #log function
+    log_action_prob = K.log(action_prob)
+    loss = - log_action_prob * discount_reward_placeholder
+    loss = K.mean(loss)
+
+    adam = optimizers.Adam()
+    updates = adam.get_updates(params=model.trainable_weights,loss=loss)
+    train_fn = K.function(inputs=[model.input,action_onehot_placeholder,discount_reward_placeholder],outputs=[],updates=updates)
+    return train_fn
+
 
 if __name__ == "__main__":
     main()

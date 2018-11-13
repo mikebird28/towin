@@ -13,7 +13,6 @@ import gc
 from keras import backend as K
 import logging
 import tensorflow as tf
-import random
 import utils
 import time
 
@@ -52,7 +51,7 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
     epoch_size = 100000
     batch_size = 512
     swap_interval = 1
-    log_interval = 100
+    log_interval = 50
     lr_update_interval = 100000
     avg_loss = 0
     eval_variable = target_variable + "_eval"
@@ -69,9 +68,9 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
     test_df = remove_irregal(test_df,target = target_variable)
 
     bg = BatchGenerator(df,target_variable,categoricals)
-    train_batch = Batch(df,eval_variable, categoricals)
+    #train_batch = Batch(df,eval_variable, categoricals)
+    #train_x,train_y = train_batch.get_all()
     test_batch = Batch(test_df,eval_variable,categoricals)
-    train_x,train_y = train_batch.get_all()
     test_x,test_y = test_batch.get_all()
     del(df,test_df,test_batch);gc.collect()
 
@@ -83,19 +82,17 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
     y_holder = DataHolderY(batch_size,2)
 
     for i in range(1,epoch_size+1):
+        rewards_time = time.time()
         races = bg.get_batch(batch_size)
-        choose_avg = 0
-        reward_avg = 0
+
         for j in range(batch_size):
-            choose_start = time.time()
             x1,x2,y1,y2 = races[j].choose_one_others()
             x_holder.update(j, x1)
-            choose_avg += time.time() - choose_start
-            reward_start = time.time()
             y_holder.update(j, get_rewards(tmp_model,x1,x2,y1,y2))
-            reward_avg += time.time() - reward_start
-        #print("choose : {}".format(choose_avg))
-        #print("reward : {}".format(reward_avg))
+
+        rewards_time = time.time() - rewards_time
+        print("[{}] reward : {}".format(i,rewards_time))
+
         history = model.fit(x_holder.get_dataset(), y_holder.get_dataset(), verbose = 0, epochs = 1,batch_size = batch_size)
         avg_loss += history.history["loss"][0]
 
@@ -140,16 +137,19 @@ class BatchGenerator(object):
         df = relocate_df(df,categoricals,numericals)
 
         self.races = []
-        for idx,race in df.groupby("hi_RaceID"):
+        race_groups = df.groupby("hi_RaceID")
+        self.races = np.ndarray(shape = (len(race_groups)), dtype = object)
+        count = 0
+
+        for idx,race in race_groups:
             x = remove_process_features(race)
             y = race.loc[:,target_varibale]
             race = Race(x,y,separate_idx,categoricals)
-            self.races.append(race)
+            self.races[count] = race
+            count += 1
 
     def get_batch(self,batch_size):
-        total_races = len(self.races)
-        target_idx = random.sample(range(total_races),batch_size)
-        races = [self.races[i] for i in target_idx]
+        races = np.random.choice(self.races,size = batch_size)
         return races
 
 class Race(object):
@@ -222,7 +222,7 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     action_reward[1] = y
 
     pred = model.predict(x_dash)
-    pred = np.squeeze(pred)
+    pred[:] = np.squeeze(pred)
 
     horse_num = len(x_dash["main"])
     reward_matrix = np.ones([horse_num,2])
@@ -232,36 +232,54 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     visited = np.ones_like(pred)
     puct_coef = np.zeros(shape = [horse_num,2])
     bin_pred = np.zeros(shape = [horse_num,2])
+    buy_result = np.zeros(shape = [horse_num,2])
     reward = np.zeros(shape = [2])
 
     for i in range(iter_times):
-        puct_coef[:] = np.sqrt(visited.sum(axis = 1,keepdims = True) - visited) / (0.01 + visited)
-        bin_pred[:] = get_action_by_puct(puct_coef * pred)
+        #calculate puct value (separate to two formula to avoid memory allcation
+        puct_coef[:] = np.sqrt(visited.sum(axis = 1,keepdims = True) - visited)
+        puct_coef[:] /= (0.01 + visited)
 
+        #in case use puct value
+        #bin_pred[:] = get_action_by_puct(puct_coef * pred)
+        puct_coef *= pred
+        bin_pred[:] = get_action_by_puct(puct_coef)
+        visited += bin_pred
+
+        #in case use probability sampling action 
         #pred_r = puct_coef * pred
         #pred_r = pred / pred.sum(axis = 1,keep_dims = True)
         #bin_pred = get_action_by_prob(pred_r)
-        visited += bin_pred
 
-        reward[:] = action_reward + (reward_matrix * bin_pred).sum().sum() - horse_number
-        reward[:] = np.where(reward > 0.4, 1 ,0)
-        reward_sum += reward
+        #caluculate reawrds (separate to multiple formula to avoid memory allocation)
+        #reward[:] = action_reward + (reward_matrix * bin_pred).sum() - horse_number
+        buy_result[:] = bin_pred * reward_matrix
+        reward[:] = action_reward
+        reward += buy_result.sum()
+        reward -= horse_number
+        reward_sum += np.where(reward > 0.4, 1 ,0)
 
     reward_mean = reward_sum/iter_times
-    reward_mean = reward_mean - reward_mean.mean()
+    reward_mean -= reward_mean.mean()
+    #reward_mean = reward_mean - reward_mean.mean()
     return reward_mean 
 
-def get_action_by_prob(pred):
+def get_action_by_prob(pred,s,r,k):
     #rescale to consitent sum to 1
     s = pred.cumsum(axis=1)
     r = np.random.rand(pred.shape[0])
     k = (s.T < r).sum(axis=0).clip(0,1)
-    ret = np.zeros_like(pred)
-    ret[np.arange(pred.shape[0]),k] = 1
-    return ret
+    #ret = np.zeros_like(pred)
+    #ret[np.arange(pred.shape[0]),k] = 1
 
+    #reuse s to avoid newly memory allocation
+    s[:] = 0
+    s[np.arange(pred.shape[0]),k] = 1
+    return s
+
+_eye_array = np.eye(2)
 def get_action_by_puct(pred):
-    return np.eye(2)[pred.argmax(axis = 1)]
+    return _eye_array[pred.argmax(axis = 1)]
 
 def evaluate(model,x,y):
     pred = model.predict(x)
@@ -307,7 +325,8 @@ def nn(numerical_features, max_values):
     #Constants
     LEARNING_RATE = 1e-4
     L2_COEF = 1e-4
-    UNIT_SIZE = 1024
+    UNIT_SIZE = 1536
+    #UNIT_SIZE = 1024
     DROPOUT_RATE = 0.4
 
     inputs = []

@@ -1,5 +1,9 @@
 cache_files/*
 eda
 models
+old
 train_pred.csv
 test_pred.csv
+*.log
+__pycache__
+scripts

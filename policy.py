@@ -31,6 +31,7 @@ def main():
     removes = utils.load_removes("./configs/remove.csv")
     categoricals,numericals = utils.cats_and_nums(columns,columns_dict)
     df = pd.read_csv("./data/output.csv",dtype = columns_dict,usecols = columns)
+    #df = pd.read_feather("./data/output.feather",dtype = columns_dict,usecols = columns)
     df = df[df["ri_Year"] >= 2007]
 
     p = preprep.Preprep("./cache_files/fpolicy")
@@ -51,7 +52,7 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
     epoch_size = 100000
     batch_size = 512
     swap_interval = 1
-    log_interval = 50
+    log_interval = 100
     lr_update_interval = 100000
     avg_loss = 0
     eval_variable = target_variable + "_eval"
@@ -68,7 +69,9 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
     test_df = remove_irregal(test_df,target = target_variable)
 
     bg = BatchGenerator(df,target_variable,categoricals)
-    test_batch = Batch(df,target_variable,categoricals)
+    train_batch = Batch(df,eval_variable, categoricals)
+    test_batch = Batch(test_df,eval_variable,categoricals)
+    train_x,train_y = train_batch.get_all()
     test_x,test_y = test_batch.get_all()
     del(df,test_df,test_batch);gc.collect()
 
@@ -86,15 +89,13 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
         for j in range(batch_size):
             choose_start = time.time()
             x1,x2,y1,y2 = races[j].choose_one_others()
-            print(y1)
-            print(y2)
             x_holder.update(j, x1)
             choose_avg += time.time() - choose_start
             reward_start = time.time()
             y_holder.update(j, get_rewards(tmp_model,x1,x2,y1,y2))
             reward_avg += time.time() - reward_start
-        print("choose : {}".format(choose_avg))
-        print("reward : {}".format(reward_avg))
+        #print("choose : {}".format(choose_avg))
+        #print("reward : {}".format(reward_avg))
         history = model.fit(x_holder.get_dataset(), y_holder.get_dataset(), verbose = 0, epochs = 1,batch_size = batch_size)
         avg_loss += history.history["loss"][0]
 
@@ -109,7 +110,8 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
             avg_loss = avg_loss/log_interval
             print(i)
             print("averate trian loss : {}".format(avg_loss))
-            print(y_holder.get_dataset())
+            #print(y_holder.get_dataset().max())
+            #print(y_holder.get_dataset().min())
             #evaluate(model,train_x,train_y)
             evaluate(model,test_x,test_y)
             avg_loss = 0
@@ -118,12 +120,12 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
 class Batch(object):
     def __init__(self,df,target_variable,categoricals):
         all_features = [c for c in df.columns if c not in PROCESS_FEATURE]
-        categoricals = sorted([c for c in all_features if c in categoricals])
-        numericals = sorted([c for c in all_features if c not in categoricals])
-        self.separate_idx = len(numericals)
-        df = relocate_df(df,categoricals,numericals)
-        self.x = remove_process_features(df)
-        self.y = df.loc[:,target_variable]
+        self.categoricals = sorted([c for c in all_features if c in categoricals])
+        self.numericals = sorted([c for c in all_features if c not in categoricals])
+        self.separate_idx = len(self.numericals)
+        df = relocate_df(df,categoricals,self.numericals)
+        self.x = remove_process_features(df).values
+        self.y = df.loc[:,target_variable].values
 
     def get_all(self):
         x = convert_to_trainable(self.x,self.separate_idx, self.categoricals)
@@ -203,8 +205,8 @@ def relocate_df(df,cats,nums):
     return df
 
 def remove_process_features(df):
-    numericals = [c for c in df.columns if c not in PROCESS_FEATURE]
-    return df.loc[:,numericals]
+    features = [c for c in df.columns if c not in PROCESS_FEATURE]
+    return df.loc[:,features]
 
 def convert_to_trainable(x,separate_idx,categoricals):
     x_dict = {}
@@ -226,7 +228,7 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_matrix = np.ones([horse_num,2])
     reward_matrix[:,1] = y_dash
 
-    horse_number = len(x_dash) + 1
+    horse_number = len(x_dash["main"]) + 1
     visited = np.ones_like(pred)
     puct_coef = np.zeros(shape = [horse_num,2])
     bin_pred = np.zeros(shape = [horse_num,2])
@@ -323,8 +325,8 @@ def nn(numerical_features, max_values):
         out_dim = embedding_size(inp_dim)
         x = Input(shape = (1,),dtype = "float32",name = c)
         inputs.append(x)
-        x = Embedding(inp_dim,out_dim,input_length = 1, embeddings_regularizer = keras.regularizers.l2(0.01))(x)
-        x = SpatialDropout1D(0.3)(x)
+        x = Embedding(inp_dim,out_dim,input_length = 1, embeddings_regularizer = keras.regularizers.l2(L2_COEF))(x)
+        x = SpatialDropout1D(0.2)(x)
         x = Flatten()(x)
         flatten_layers.append(x)
     x = Concatenate()(flatten_layers)
@@ -352,13 +354,15 @@ def log_loss(y_true, y_pred):
 
 def embedding_size(size):
     if size < 10:
-        return size // 3 + 1
+        return size // 2 + 1
     elif size < 30:
         return size // 5 + 1
     elif size < 150:
         return size // 10 + 1
+    elif size < 300:
+        return size // 15 + 1
     else:
-        return size // 20 + 1
+        return size // 50 + 1
 
 #preprocess functions
 class fillna(preprep.Operator):

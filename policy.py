@@ -1,20 +1,21 @@
 import preprep
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from sklearn.preprocessing import LabelEncoder
 import keras
+from sklearn.preprocessing import LabelEncoder
+import tensorflow as tf
+from keras import backend as K
 from keras.models import Model
 from keras.layers import Dense, Activation, Dropout, Input, Embedding ,Concatenate, Flatten, SpatialDropout1D
 from keras.layers.normalization import BatchNormalization
 from keras import regularizers
 from keras import optimizers
-import gc
-from keras import backend as K
+from tqdm import tqdm
 import logging
-import tensorflow as tf
-import utils
+import gc
 import time
+import utils
+import add_features
 
 PROCESS_FEATURE = utils.process_features() + ["hr_PaybackPlace_eval","hr_PaybackWin_eval"]
 PROCESS_FEATURE = ["hi_Distance","ri_Year"] + PROCESS_FEATURE
@@ -30,15 +31,14 @@ def main():
     removes = utils.load_removes("./configs/remove.csv")
     categoricals,numericals = utils.cats_and_nums(columns,columns_dict)
     df = pd.read_csv("./data/output.csv",dtype = columns_dict,usecols = columns)
-    #df = pd.read_feather("./data/output.feather",dtype = columns_dict,usecols = columns)
     df = df[df["ri_Year"] >= 2007]
 
     p = preprep.Preprep("./cache_files/fpolicy")
+    p = p.add(preprocess_1, name = "preprocess1", cache_format = "feather")
     p = p.add(fillna(),params = {"categoricals" : categoricals},name = "fillna",cache_format = "feather")
     p = p.add(label_encoding,params = {"categoricals" : categoricals},name = "lenc", cache_format = "feather")
     p = p.add(normalize(), params = {"categoricals" : categoricals}, name = "norm", cache_format = "feather")
     p = p.add(drop_columns, params = {"remove" : removes}, name = "drop", cache_format = "feather")
-    #p = p.add(onehot_encoding,params = {"categoricals" : categoricals}, name = "ohe",cache_format = "feather")
     df = p.fit_gene(df,verbose = True)
     df,test_df = split_with_year(df,year = 2017)
     del(p)
@@ -55,7 +55,6 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
     lr_update_interval = 100000
     avg_loss = 0
     eval_variable = target_variable + "_eval"
-
 
     #feature informations
     all_features = [c for c in df.columns if c not in PROCESS_FEATURE]
@@ -107,8 +106,6 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
             avg_loss = avg_loss/log_interval
             print(i)
             print("averate trian loss : {}".format(avg_loss))
-            #print(y_holder.get_dataset().max())
-            #print(y_holder.get_dataset().min())
             #evaluate(model,train_x,train_y)
             evaluate(model,test_x,test_y)
             avg_loss = 0
@@ -483,15 +480,20 @@ class normalize(preprep.Operator):
         logger = logger or logging.getLogger(__name__)
         logger.debug("normalize : function called")
 
-        special_columns = ["li_WinOdds","ri_Distance"]
-        remove = ["hr_OrderOfFinish","ri_Year","hi_RaceID","hr_PaybackWin","hr_PaybackPlace","hr_PaybackWin_eval","hr_PaybackPlace_eval"] + special_columns
+        race_features = [
+            "ri_Distance","li_FieldStatus","hi_Times","ri_FirstPrize","ri_HaedCount","ri_Month","li_WinOdds",
+            "nige_ratio","senko_ratio","sasi_ratio","oikomi_ratio","kouji_ratio","jizai_ratio",
+        ]
+        race_features = [c for c in df.columns if c in race_features]
+
+        remove = ["hr_OrderOfFinish","ri_Year","hi_RaceID","hr_PaybackWin","hr_PaybackPlace","hr_PaybackWin_eval","hr_PaybackPlace_eval"] + race_features
         numericals = [c for c in df.columns if c not in set(categoricals + remove)]
 
         nan_rate = 1 - df.loc[:,numericals].isnull().sum().sum()/float(df.size)
         logger.debug("nan rate before normalization : {}".format(nan_rate))
 
         df = _norm_with_race(df,numericals)
-        df = _norm_with_df(df,special_columns)
+        df = _norm_with_df(df,race_features)
         nan_rate = 1 - df.loc[:,numericals].isnull().sum().sum()/float(df.size)
 
         logger.debug("nan rate after normalization : {}".format(nan_rate))
@@ -510,6 +512,7 @@ def _norm_with_race(df,numericals = [],logger = None):
     logger = logger or logging.getLogger(__name__)
 
     #drop duplicates
+
     numericals = sorted([c for c in list(set(numericals)) if c != key])
     targets = numericals + [key]
 
@@ -552,6 +555,13 @@ def _norm_with_race(df,numericals = [],logger = None):
 
     drop_targets = [c for c in mean_cols + std_cols if c != key]
     df.drop(drop_targets,axis = 1, inplace = True)
+    return df
+
+def preprocess_1(df):
+    df = add_features.add_run_style_info(df)
+    df = add_features.add_datetime_info(df)
+    df = add_features.add_corner_info(df)
+    df = add_features.add_delta_info(df)
     return df
 
 def _is_win(df):

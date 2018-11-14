@@ -19,6 +19,7 @@ gcloud beta compute instances create-with-container ${INSTANCE_NAME} \
     --preemptible \
     --zone=us-east1-b \
     --machine-type=custom-4-20480 \
+    --min-cpu-platform="Intel Haswell"\
     --subnet=default \
     --network-tier=PREMIUM \
     --metadata=google-logging-enabled=true \

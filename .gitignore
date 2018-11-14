@@ -7,4 +7,7 @@ train_pred.csv
 test_pred.csv
 lgb_exec.log
 cnn_exec.log
+__pycache__
+.ipynb_checkpoints
+.DS_Store
 

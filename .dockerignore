@@ -1,4 +1,7 @@
 cache_files/*
+data/output.feather
+data/train_pred.csv
+data/test_pred.csv
 eda
 models
 old

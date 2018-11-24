@@ -145,14 +145,17 @@ def fix_extra_info(df):
         place = "{}_{}{}".format(table_prefix,p,"Place")
         win_per = "{}_{}{}".format(table_prefix,p,"WinPer")
         place_per = "{}_{}{}".format(table_prefix,p,"PlacePer")
+        lose_per = "{}_{}{}".format(table_prefix,p,"LosePer")
+
         df.loc[:,total] = df.loc[:,first] + df.loc[:,second] + df.loc[:,third] + df.loc[:,lose]
         df.loc[:,place] = df.loc[:,first] + df.loc[:,second] + df.loc[:,third]
         df.loc[:,win_per] = df.loc[:,first]/df.loc[:,total]
         df.loc[:,place_per] = df.loc[:,place]/df.loc[:,total]
+        df.loc[:,lose_per] = df.loc[:,lose]/df.loc[:,total]
 
         df.drop(second,inplace = True,axis = 1)
         df.drop(third,inplace = True,axis = 1)
-        df.drop(lose,inplace = True,axis = 1)
+        #df.drop(lose,inplace = True,axis = 1)
 
     total = "ei_TotalTotal"
     win = "ei_TotalWin"
@@ -497,6 +500,12 @@ def avg_past3(df,categoricals = []):
         df.loc[:,min3_name] = df.loc[:,past3_f].min(axis = 1)
         df.loc[:,max3_name] = df.loc[:,past3_f].max(axis = 1)
     df.drop(drop_targets, axis = 1, inplace = True)
+    return df
+
+def add_null_count(df,name = "null_count"):
+    nullcount = df.isnull().astype(np.int8).sum(axis = 1)
+    nullcount.name = name
+    df = pd.concat([df,nullcount],axis = 1)
     return df
             
 if __name__ == "__main__":

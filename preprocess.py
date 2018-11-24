@@ -29,22 +29,29 @@ class fillna(preprep.Operator):
         df.loc[:,"hr_PaybackPlace"] = (df.loc[:,"hr_PaybackPlace"].fillna(0)/100).clip(0.0,100.0)
 
         remove = ["hr_PaybackWin","hr_PaybackWin_eval","hr_PaybackPlace","hr_PaybackPlace_eval"]
-        #nan_rate = 1 - df.isnull().sum().sum()/float(df.size)
-        #logger.debug("nan rate check at start of fillna : {}".format(nan_rate))
-        df = _fillna_with_race(df,categoricals,remove = remove)
+        #df = _fillna_with_race(df,categoricals,remove = remove)
+        _fillna_with_horse(df,categoricals,remove = remove)
         nan_rate = 1 - df.isnull().sum().sum()/float(df.size)
         logger.debug("nan rate check at end of fillna : {}".format(nan_rate))
         return df
 
 def _fillna_with_horse(df, categoricals, remove = None):
-    for f in tqdm(df.columns):
-        if f in categoricals:
-            df.loc[:,f].fillna("nan",inplace = True)
+    key = "hi_RaceID"
+    if remove is None:
+        remove = [key]
+    else:
+        remove += key
+
+    categoricals = [c for c in df.columns if c in categoricals]
+    numericals = [c for c in df.columns if c not in categoricals + remove]
+
+    to_float(df,numericals)
+    for f in tqdm(numericals):
         mean = df[f].mean()
         if np.isnan(mean):
             mean = 0
-        df.loc[:,f].fillna(mean,inplace = True)
-    return df
+        df.loc[:,f] = df.loc[:,f].fillna(mean)
+    df.loc[:,categoricals] = df.loc[:,categoricals].fillna("nan")
 
 def _fillna_with_race(df,categoricals, remove = None):
     key = "hi_RaceID"

@@ -144,9 +144,14 @@ class BatchGenerator(object):
             self.races[count] = race
             count += 1
 
-    def get_batch(self,batch_size):
-        races = np.random.choice(self.races,size = batch_size)
-        #races_2 = np.random.choice(self.races,size = batch_size)
+    def get_batch(self,batch_size,race_num = 1):
+        if race_num == 1:
+            races = np.random.choice(self.races,size = batch_size)
+            return races
+        else:
+            size = (batch_size,race_num)
+            races = np.random.choice(self.races,size = size).reshape(batch_size,race_num)
+            return concat_races(races)
         return races
 
 class Race(object):
@@ -166,6 +171,14 @@ class Race(object):
         y1 = self.y[idx]
         y2 = self.y[~idx]
         return x1,x2,y1,y2
+
+def concat_races(races):
+    def f(rows):
+        stacked_x = np.vstack([r.x for r in rows])
+        stacked_y = np.vstack([r.y for r in rows])
+        new_race = Race(stacked_x,stacked_y,rows[0].separate_idx,rows[0].categoricals)
+        return new_race
+    return np.apply_along_axis(f,0,races)
 
 class DataHolderX(object):
     def __init__(self,batch_size,categoricals,numericals):
@@ -424,6 +437,8 @@ def drop_columns(df,remove = None, target = None,logger = None):
         return df
 
 def preprocess_1(df):
+    df = add_features.add_null_count(df)
+    df = add_features.fix_extra_info(df)
     df = add_features.add_run_style_info(df)
     df = add_features.add_datetime_info(df)
     df = add_features.add_corner_info(df)

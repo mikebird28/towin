@@ -4,6 +4,14 @@ import numpy as np
 import pandas as pd
 import gc
 
+def additional_categoricals():
+    ls = [
+        "hoof_size","hoof_type","distance_category","grade_change","inout_change","leftright_change","course_change",
+        "has_pre1","has_pre2","has_pre3","has_li","has_ri","has_ti",
+    ]
+    return ls
+
+
 def parse_feature(df):
     def to_dist_cat(x):
         if 1000 <= x and x <= 1400:
@@ -202,6 +210,9 @@ def add_delta_info(df):
         ("pre1_Weight","pre2_Weight","weight_delta_pre1"),
         ("pre2_Weight","pre3_Weight","weight_delta_pre2"),
         ("li_BasisWeight","pre1_BasisWeight","basis_weight_delta"),
+        ("pre1_OrderOfFinish","pre1_Pass4", "nobi_pre1"),
+        ("pre2_OrderOfFinish","pre2_Pass4", "nobi_pre2"),
+        ("pre3_OrderOfFinish","pre3_Pass4", "nobi_pre3"),
         ("pre1_Pass4","pre1_Pass3","pass_delta_pre1"),
         ("pre2_Pass4","pre2_Pass3","pass_delta_pre2"),
         ("pre3_Pass4","pre3_Pass3","pass_delta_pre3"),
@@ -293,15 +304,6 @@ def add_course_info(df):
     df["mother_surf_winper"] = df.apply(mother_surf_winper,axis = 1)
     return df
 
-horse_f = [
-    "bi_FPedigreeCode2","bi_MFPedigreeCode2","hoof_size","hoof_type","hi_RunningStyle",
-#    "hi_BodyType","hi_BellySize","hi_HipSize","hi_ChestSize",
-]
-race_f = ["ri_Discipline","li_FieldCode","distance_category","li_WeatherCode","ri_InOut",]
-
-all_f = horse_f + race_f
-
-
 def add_combinational_feature(df):
     def comb_f(df,new,f1,f2):
         df[new] = df.loc[:,f1] + df.loc[:,f2]
@@ -323,25 +325,6 @@ def add_combinational_feature(df):
             nf = "{}_{}".format(f1_rem,f2_rem)
             comb_f(df,nf,f1,f2)
     return df
-
-def additional_categoricals():
-    ls = ["hoof_size","hoof_type","distance_category","grade_change","inout_change","leftright_change","course_change"]
-
-    for f1 in horse_f:
-        for f2 in race_f:
-            #premove prefix
-            if f1 != f1.lower():
-                f1_rem = f1.split("_")[1].lower()
-            else:
-                f1_rem = f1
-            if f2 != f2.lower():
-                f2_rem = f2.split("_")[1].lower()
-            else:
-                f2_rem = f2
-            nf = "{}_{}".format(f1_rem,f2_rem)
-            ls.append(nf)
-    return ls
-
 def add_run_style_info(df):
     #1 逃げ 2 先行 3 差し 4 追込 5 好位差し 6 自在
     groups = df[["hi_RaceID","hi_RunningStyle"]].groupby("hi_RaceID")
@@ -507,6 +490,22 @@ def add_null_count(df,name = "null_count"):
     nullcount.name = name
     df = pd.concat([df,nullcount],axis = 1)
     return df
+
+def add_season_info(df):
+    df.loc[:,"season_rad"] = np.pi/6 * df.loc[:,"ri_Month"]
+    df.loc[:,"season_sin"] = np.sin(df["season_rad"])
+    df.loc[:,"season_cos"] = np.cos(df["season_rad"])
+    df.drop("season_rad",axis = 1 ,inplace = True)
+    return df
+
+def add_has_info(df):
+    df["has_pre1"] = df["pre1_RaceID"].isnull().astype(np.int8)
+    df["has_pre2"] = df["pre2_RaceID"].isnull().astype(np.int8)
+    df["has_pre3"] = df["pre3_RaceID"].isnull().astype(np.int8)
+    df["has_li"] = df["li_RaceID"].isnull().astype(np.int8)
+    df["has_ei"] = df["ei_RaceID"].isnull().astype(np.int8)
+    return df
+
             
 if __name__ == "__main__":
     df = pd.read_csv("data/output.csv",nrows = 50000)

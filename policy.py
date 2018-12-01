@@ -17,6 +17,9 @@ import time
 import utils
 import add_features
 import preprocess
+import argparse
+
+REWARD_THREHOLD = 0.4
 
 PROCESS_FEATURE = utils.process_features() + ["hr_PaybackPlace_eval","hr_PaybackWin_eval"]
 PROCESS_FEATURE = ["hi_Distance","ri_Year"] + PROCESS_FEATURE
@@ -38,6 +41,7 @@ def main():
     p = p.add(preprocess_1, name = "preprocess1", cache_format = "feather")
     p = p.add(preprocess.fillna(),params = {"categoricals" : categoricals},name = "fillna",cache_format = "feather")
     p = p.add(label_encoding,params = {"categoricals" : categoricals},name = "lenc", cache_format = "feather")
+    p = p.add(preprocess_2, name = "preprocess2", cache_format = "feather")
     p = p.add(preprocess.normalize(), params = {"categoricals" : categoricals}, name = "norm", cache_format = "feather")
     p = p.add(drop_columns, params = {"remove" : removes}, name = "drop", cache_format = "feather")
     df = p.fit_gene(df,verbose = True)
@@ -49,6 +53,7 @@ def main():
 def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackPlace"):
     epoch_size = 100000
     batch_size = 512
+    #batch_size = 256
     swap_interval = 1
     log_interval = 50
     lr_update_interval = 100000
@@ -81,12 +86,13 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
 
     for i in range(1,epoch_size+1):
         rewards_time = time.time()
-        races = bg.get_batch(batch_size)
+        races = bg.get_batch(batch_size,race_num = 2)
 
         for j in range(batch_size):
             x1,x2,y1,y2 = races[j].choose_one_others()
             x_holder.update(j, x1)
-            y_holder.update(j, get_rewards(tmp_model,x1,x2,y1,y2))
+            y_holder.update(j, get_rewards_epsilon(tmp_model,x1,x2,y1,y2))
+            #y_holder.update(j, get_rewards(tmp_model,x1,x2,y1,y2))
 
         rewards_time = time.time() - rewards_time
         print("[{}] reward : {}".format(i,rewards_time))
@@ -140,7 +146,7 @@ class BatchGenerator(object):
         for idx,race in race_groups:
             x = remove_process_features(race)
             y = race.loc[:,target_varibale]
-            race = Race(x,y,separate_idx,categoricals)
+            race = Race(x.values,y.values,separate_idx,categoricals)
             self.races[count] = race
             count += 1
 
@@ -150,14 +156,15 @@ class BatchGenerator(object):
             return races
         else:
             size = (batch_size,race_num)
-            races = np.random.choice(self.races,size = size).reshape(batch_size,race_num)
-            return concat_races(races)
+            races = np.random.choice(self.races,size = size).reshape([batch_size,race_num])
+            races = concat_races(races)
+            return races
         return races
 
 class Race(object):
     def __init__(self,x,y,separate_idx,categoricals):
-        self.x = x.values
-        self.y = y.values
+        self.x = x
+        self.y = y
         self.separate_idx = separate_idx
         self.categoricals = categoricals
 
@@ -175,10 +182,10 @@ class Race(object):
 def concat_races(races):
     def f(rows):
         stacked_x = np.vstack([r.x for r in rows])
-        stacked_y = np.vstack([r.y for r in rows])
+        stacked_y = np.hstack([r.y for r in rows])
         new_race = Race(stacked_x,stacked_y,rows[0].separate_idx,rows[0].categoricals)
         return new_race
-    return np.apply_along_axis(f,0,races)
+    return np.apply_along_axis(f,1,races)
 
 class DataHolderX(object):
     def __init__(self,batch_size,categoricals,numericals):
@@ -226,6 +233,32 @@ def convert_to_trainable(x,separate_idx,categoricals):
         x_dict[col] = x[:,i]
     return x_dict
 
+def get_rewards_epsilon(model, x, x_dash, y, y_dash, epsilon = 0.1):
+    horse_num = len(x_dash) + 1
+    reward_matrix = np.ones([len(y_dash),2])
+    reward_matrix[:,1] = y_dash
+
+    #decide tickets to buy and get rewards
+    epsilon_mask = np.random.binomial(1,epsilon,len(y_dash))
+    pred = model.predict(x_dash)
+    pred[:] = np.squeeze(pred)
+
+    action = pred.argmax(axis = 1)
+    action[:] = np.logical_xor(action,epsilon_mask).astype(np.int8)
+
+    pred[:] = np.eye(2)[action] #convert pred to binary, reuse pred to avoid unnecessary memory allocaton
+    pred *= reward_matrix #calculate each rewards
+
+    #init reward 
+    reward = np.ones(shape = [2])
+    reward[1] = y
+
+    reward += reward_matrix.sum()
+    reward -= horse_num
+    reward[:] += np.where(reward > REWARD_THREHOLD, 1 ,0)
+    reward -= reward.mean()
+    return reward
+
 def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
     reward_sum = np.zeros(shape = [2])
     action_reward = np.ones(shape = [2])
@@ -240,38 +273,36 @@ def get_rewards(model, x, x_dash, y, y_dash,iter_times = 30):
 
     horse_number = len(x_dash["main"]) + 1
     visited = np.ones_like(pred)
-    puct_coef = np.zeros(shape = [horse_num,2])
+
+    puct_bias = np.zeros(shape = [horse_num,2])
+
     bin_pred = np.zeros(shape = [horse_num,2])
     buy_result = np.zeros(shape = [horse_num,2])
     reward = np.zeros(shape = [2])
 
     for i in range(iter_times):
         #calculate puct value (separate to two formula to avoid memory allcation
-        puct_coef[:] = np.sqrt(visited.sum(axis = 1,keepdims = True) - visited)
-        puct_coef[:] /= (0.01 + visited)
+        #puct = win_num /visted + const * pred * np.sqrt(visited.sum(axis = 1, keepdims = True) - visited)
+        puct_bias[:] = np.sqrt(visited.sum(axis = 1,keepdims = True) - visited)
+        puct_bias /= (0.01 + visited)
+        puct_bias *= pred
 
         #in case use puct value
-        #bin_pred[:] = get_action_by_puct(puct_coef * pred)
-        puct_coef *= pred
-        bin_pred[:] = get_action_by_puct(puct_coef)
+        bin_pred[:] = get_action_by_puct(puct_bias)
         visited += bin_pred
 
-        #in case use probability sampling action 
-        #pred_r = puct_coef * pred
-        #pred_r = pred / pred.sum(axis = 1,keep_dims = True)
-        #bin_pred = get_action_by_prob(pred_r)
-
         #caluculate reawrds (separate to multiple formula to avoid memory allocation)
-        #reward[:] = action_reward + (reward_matrix * bin_pred).sum() - horse_number
-        buy_result[:] = bin_pred * reward_matrix
+        #buy_result[:] = bin_pred * reward_matrix
+        buy_result[:] = bin_pred
+        buy_result *= reward_matrix
+
         reward[:] = action_reward
         reward += buy_result.sum()
         reward -= horse_number
-        reward_sum += np.where(reward > 0.4, 1 ,0)
+        reward_sum += np.where(reward > REWARD_THREHOLD, 1 ,0)
 
     reward_mean = reward_sum/iter_times
     reward_mean -= reward_mean.mean()
-    #reward_mean = reward_mean - reward_mean.mean()
     return reward_mean 
 
 def get_action_by_prob(pred,s,r,k):
@@ -330,15 +361,7 @@ def categorical_max_values(df_ls,categoricals):
     return ret_dic
 
 # NN functions
-def nn(numerical_features, max_values):
-
-    #Constants
-    LEARNING_RATE = 1e-4
-    L2_COEF = 1e-4
-    UNIT_SIZE = 1536
-    #UNIT_SIZE = 1024
-    DROPOUT_RATE = 0.4
-
+def nn(numerical_features, max_values, learning_rate = 1e-4, l2_coef = 1e-4, unit_size = 1024, dropout_rate = 0.4):
     inputs = []
     flatten_layers = []
 
@@ -354,26 +377,27 @@ def nn(numerical_features, max_values):
         out_dim = embedding_size(inp_dim)
         x = Input(shape = (1,),dtype = "float32",name = c)
         inputs.append(x)
-        x = Embedding(inp_dim,out_dim,input_length = 1, embeddings_regularizer = keras.regularizers.l2(L2_COEF))(x)
+        x = Embedding(inp_dim,out_dim,input_length = 1, embeddings_regularizer = keras.regularizers.l2(l2_coef))(x)
         x = SpatialDropout1D(0.2)(x)
         x = Flatten()(x)
         flatten_layers.append(x)
     x = Concatenate()(flatten_layers)
 
-    x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(L2_COEF))(x)
+    x = Dense(units = unit_size, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
-    x = Dropout(DROPOUT_RATE)(x)
+    x = Dropout(dropout_rate)(x)
 
-    x = Dense(units = UNIT_SIZE, kernel_regularizer = regularizers.l2(L2_COEF))(x)
+    x = Dense(units = unit_size, kernel_regularizer = regularizers.l2(l2_coef))(x)
     x = Activation("relu")(x)
-    x = Dropout(DROPOUT_RATE)(x)
+    x = Dropout(dropout_rate)(x)
 
     x = BatchNormalization()(x)
-    x = Dense(units = 2,kernel_regularizer = regularizers.l2(L2_COEF), bias_regularizer = regularizers.l2(L2_COEF))(x)
+    x = Dense(units = 2,kernel_regularizer = regularizers.l2(l2_coef), bias_regularizer = regularizers.l2(l2_coef))(x)
+    #x = Dense(units = 2,kernel_regularizer = regularizers.l2(1e-2), bias_regularizer = regularizers.l2(1e-2))(x)
     x = Activation("softmax")(x)
 
     model = Model(inputs = inputs,outputs = x)
-    opt = keras.optimizers.RMSprop(lr=LEARNING_RATE, rho = 0.9)
+    opt = keras.optimizers.RMSprop(lr=learning_rate, rho = 0.9)
     model.compile(loss = log_loss, optimizer=opt)
     return model,opt
 
@@ -423,6 +447,9 @@ def label_encoding(df,categoricals = [],logger = None):
 def drop_columns(df,remove = None, target = None,logger = None):
     logger = logger or logging.getLogger(__name__)
     logger.debug("drop_columns : function called")
+    remove.append("has_li")
+    remove.append("has_ti")
+    remove.append("has_ri")
     if (remove is not None) and (target is not None):
         raise ValueError("you can use only 'remove' or 'target' either")
     elif remove is not None:
@@ -438,11 +465,16 @@ def drop_columns(df,remove = None, target = None,logger = None):
 
 def preprocess_1(df):
     df = add_features.add_null_count(df)
+    df = add_features.add_has_info(df)
     df = add_features.fix_extra_info(df)
     df = add_features.add_run_style_info(df)
     df = add_features.add_datetime_info(df)
     df = add_features.add_corner_info(df)
     df = add_features.add_delta_info(df)
+    return df
+
+def preprocess_2(df):
+    df = add_features.add_season_info(df)
     return df
 
 def _is_win(df):
@@ -510,4 +542,6 @@ def fit(model):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    #parser.add_argument('--learning-rate', action="store_const")
     main()

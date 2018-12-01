@@ -109,13 +109,22 @@ class normalize(preprep.Operator):
         logger = logger or logging.getLogger(__name__)
         logger.debug("normalize : function called")
 
+        #df["null_count_raw"] = df.loc[:,"null_count"].copy()
+        #df["pre1_Distance_raw"] = df.loc[:,"pre1_Distance"].copy()
+        #df["pre2_Distance_raw"] = df.loc[:,"pre2_Distance"].copy()
+        #df["pre3_Distance_raw"] = df.loc[:,"pre3_Distance"].copy()
         race_features = [
             "ri_Distance","li_FieldStatus","hi_Times","ri_FirstPrize","ri_HaedCount","ri_Month","li_WinOdds",
-            "nige_ratio","senko_ratio","sasi_ratio","oikomi_ratio","kouji_ratio","jizai_ratio",
+            "nige_ratio","senko_ratio","sasi_ratio","oikomi_ratio","kouji_ratio","jizai_ratio","null_count_raw",
+            "season_sin","season_cos","pre1_Distance_raw","pre2_Distance_raw","pre3_Distance_raw"
+        ]
+        binary_features = [
+            "has_pre1","has_pre2","has_pre3","has_li","has_ei"
         ]
         race_features = [c for c in df.columns if c in race_features]
+        binary_features = [c for c in df.columns if c in binary_features]
 
-        remove = ["hr_OrderOfFinish","ri_Year","hi_RaceID","hr_PaybackWin","hr_PaybackPlace","hr_PaybackWin_eval","hr_PaybackPlace_eval"] + race_features
+        remove = ["hr_OrderOfFinish","ri_Year","hi_RaceID","hr_PaybackWin","hr_PaybackPlace","hr_PaybackWin_eval","hr_PaybackPlace_eval"] + race_features + binary_features
         numericals = [c for c in df.columns if c not in set(categoricals + remove)]
 
         nan_rate = 1 - df.loc[:,numericals].isnull().sum().sum()/float(df.size)

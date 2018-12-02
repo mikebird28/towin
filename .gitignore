@@ -8,6 +8,7 @@ test_pred.csv
 lgb_exec.log
 cnn_exec.log
 __pycache__
+.vscode
 .ipynb_checkpoints
 .DS_Store
 

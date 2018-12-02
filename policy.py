@@ -9,7 +9,6 @@ from keras.models import Model
 from keras.layers import Dense, Activation, Dropout, Input, Embedding ,Concatenate, Flatten, SpatialDropout1D
 from keras.layers.normalization import BatchNormalization
 from keras import regularizers
-from keras import optimizers
 from tqdm import tqdm
 import logging
 import gc
@@ -21,6 +20,8 @@ import argparse
 
 REWARD_THREHOLD = 0.4
 
+
+MODEL_NAME = "./models/policybased_model.h5"
 PROCESS_FEATURE = utils.process_features() + ["hr_PaybackPlace_eval","hr_PaybackWin_eval"]
 PROCESS_FEATURE = ["hi_Distance","ri_Year"] + PROCESS_FEATURE
 PROCESS_FEATURE.remove("li_WinOdds")
@@ -84,8 +85,9 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
     x_holder = DataHolderX(batch_size,categoricals,numericals)
     y_holder = DataHolderY(batch_size,2)
 
+    best_score = 0
     for i in range(1,epoch_size+1):
-        rewards_time = time.time()
+        rewards_elpased = time.time()
         races = bg.get_batch(batch_size,race_num = 2)
 
         for j in range(batch_size):
@@ -94,10 +96,11 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
             y_holder.update(j, get_rewards_epsilon(tmp_model,x1,x2,y1,y2))
             #y_holder.update(j, get_rewards(tmp_model,x1,x2,y1,y2))
 
-        rewards_time = time.time() - rewards_time
-        print("[{}] reward : {}".format(i,rewards_time))
-
+        rewards_elpased = time.time() - rewards_elpased
+        fit_elapsed = time.time()
         history = model.fit(x_holder.get_dataset(), y_holder.get_dataset(), verbose = 0, epochs = 1,batch_size = batch_size)
+        fit_elapsed = time.time() - fit_elapsed
+        print("[{0}] Elapsed time : {1:.3f} (rewards : {2:.3f}, fit : {3:.3f})".format(i, rewards_elpased + fit_elapsed, rewards_elpased, fit_elapsed))
         avg_loss += history.history["loss"][0]
 
         if i % swap_interval == 0:
@@ -112,7 +115,11 @@ def policy_gradient(df,test_df,categoricals = [], target_variable = "hr_PaybackP
             print(i)
             print("averate trian loss : {}".format(avg_loss))
             #evaluate(model,train_x,train_y)
-            evaluate(model,test_x,test_y)
+            metrics = evaluate(model,test_x,test_y) #metrics = (hit_ratio, ret_ratio)
+            if metrics[0] > best_score:
+                best_score = metrics[0]
+                model.save(MODEL_NAME)
+
             avg_loss = 0
             print()
 
@@ -233,7 +240,7 @@ def convert_to_trainable(x,separate_idx,categoricals):
         x_dict[col] = x[:,i]
     return x_dict
 
-def get_rewards_epsilon(model, x, x_dash, y, y_dash, epsilon = 0.1):
+def get_rewards_epsilon(model, x, x_dash, y, y_dash, epsilon = 0.05):
     horse_num = len(x_dash) + 1
     reward_matrix = np.ones([len(y_dash),2])
     reward_matrix[:,1] = y_dash
@@ -346,6 +353,7 @@ def evaluate(model,x,y):
     ret_ratio = ret_total/buy_total
     txt = "buy {}/{}, hit : {:.3f}, ret : {:.3f}".format(buy_total,race_total,hit_ratio,ret_ratio)
     print(txt)
+    return (hit_ratio,ret_ratio)
 
 def categorical_max_values(df_ls,categoricals):
     ret_dic = {}
@@ -499,47 +507,12 @@ def optimize_type(df,categoricals):
         df[c] = df[c].astype(typ)
     return df
 
+
 def remove_irregal(df,target = "hr_PaybackWin"):
     group_sum = df.loc[:,["hi_RaceID",target]].groupby("hi_RaceID")[target].sum().reset_index()
     irregals = group_sum.loc[group_sum.loc[:,target] == 0,"hi_RaceID"].values
     df = df.loc[~df.loc[:,"hi_RaceID"].isin(irregals),:]
     return df
-
-def pretrain(model,train_x,train_rew,test_x,test_rew):
-    train_payoff = np.zeros(shape = [len(train_rew),2])
-    train_payoff[:,1] = train_rew.values
-    train_payoff[:,0] = (train_payoff[:,1] == 0).astype(int)
-    #train_y = train_payoff
-    train_y = train_payoff.clip(0,1)
-
-    test_payoff = np.zeros(shape = [len(test_rew),2])
-    test_payoff[:,1] = test_rew.values
-    test_payoff[:,0] = (test_payoff[:,1] == 0).astype(int)
-    #test_y = test_payoff.clip(0,1)
-
-    epochs = 3
-    for i in range(epochs):
-        model.fit(train_x,train_y,verbose = 1, epochs = 1,batch_size = 128)
-        evaluate(model,train_x,train_rew)
-        evaluate(model,test_x,test_rew)
-
-def fit(model):
-    action_prob_placeholder = model.output
-    action_onehot_placeholder = K.placeholder(shape=(None, 2), name="action")
-
-    discount_reward_placeholder = K.placeholder(shape=(None,),name="reward")
-    action_prob = K.sum(action_prob_placeholder * action_onehot_placeholder, axis=1)
-
-    #log function
-    log_action_prob = K.log(action_prob)
-    loss = - log_action_prob * discount_reward_placeholder
-    loss = K.mean(loss)
-
-    adam = optimizers.Adam()
-    updates = adam.get_updates(params=model.trainable_weights,loss=loss)
-    train_fn = K.function(inputs=[model.input,action_onehot_placeholder,discount_reward_placeholder],outputs=[],updates=updates)
-    return train_fn
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
